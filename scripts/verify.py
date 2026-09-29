@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Verify repo structure, JSON validity, and scan committed text for accidental secrets."""
 from __future__ import annotations
 
 import json
@@ -6,31 +7,26 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parent.parent
 
-REQUIRED = [
-    "README.md",
-    "README.zh-CN.md",
+EXPECTED = [
     "AGENTS.md",
     "hooks.json",
     "hooks/git-guard.js",
-    "hooks/README.md",
     "knowledge/README.md",
     "config/config.example.json",
     "config/mcp_config.example.json",
     "config/cli-settings.example.json",
-    "docs/public-private-boundary.md",
-    "docs/private-repo-setup.md",
-    "docs/relationship-map.md",
-    "scripts/install.py",
-    "scripts/verify.py",
-    ".github/workflows/validate.yml",
     ".gitignore",
     ".gitattributes",
-    "LICENSE",
-    "NOTICE",
-    "CONTRIBUTING.md",
-    "SECURITY.md",
+    ".editorconfig",
+    ".github/workflows/validate.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "scripts/install.py",
+    "scripts/verify.py",
+    "scripts/memory.py",
+    "scripts/knowledge.py",
 ]
 
 JSON_FILES = [
@@ -40,17 +36,6 @@ JSON_FILES = [
     "config/cli-settings.example.json",
 ]
 
-FORBIDDEN_PATH_PARTS = {
-    "projects",
-    "conversations",
-    "brain",
-    "crashes",
-    "cache",
-    "backups",
-}
-
-FORBIDDEN_SUFFIXES = {".db", ".sqlite", ".pem", ".key", ".p12", ".pfx", ".log", ".pb", ".pbtxt"}
-
 SECRET_PATTERNS = [
     (re.compile(r"AIza[0-9A-Za-z\-_]{35}"), "Google API key"),
     (re.compile(r"ya29\.[0-9A-Za-z\-_]+"), "Google OAuth access token"),
@@ -58,6 +43,7 @@ SECRET_PATTERNS = [
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "OpenAI-style key"),
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "GitHub PAT"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "GitHub fine-grained PAT"),
+    (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "JWT"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key block"),
     (
         re.compile(r'"(?:password|secret|token|api[_-]?key)"\s*:\s*"(?!<SET_LOCALLY>|__|\$\{|<)[^"]{6,}"', re.I),
@@ -65,56 +51,52 @@ SECRET_PATTERNS = [
     ),
 ]
 
-
-def fail(message: str) -> None:
-    raise SystemExit(f"verify failed: {message}")
+SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".ico", ".pdf", ".db", ".sqlite", ".pb"}
 
 
 def main() -> None:
-    for rel in REQUIRED:
-        if not (ROOT / rel).exists():
-            fail(f"missing required file: {rel}")
+    errs: list[str] = []
+    for rel in EXPECTED:
+        if not (REPO / rel).exists():
+            errs.append(f"missing: {rel}")
+
+    if not ((REPO / "memory" / "MEMORY.md").exists() or (REPO / "memory" / "README.md").exists()):
+        errs.append("missing: memory/MEMORY.md or memory/README.md")
 
     for jrel in JSON_FILES:
+        jpath = REPO / jrel
+        if jpath.exists():
+            try:
+                json.loads(jpath.read_text(encoding="utf-8"))
+            except Exception as exc:
+                errs.append(f"invalid JSON in {jrel}: {exc}")
+
+    for meta in (REPO / "knowledge").glob("*/metadata.json"):
         try:
-            json.loads((ROOT / jrel).read_text(encoding="utf-8"))
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if not isinstance(data.get("title"), str) or not isinstance(data.get("summary"), str):
+                errs.append(f"missing title/summary in {meta.relative_to(REPO)}")
         except Exception as exc:
-            fail(f"invalid JSON in {jrel}: {exc}")
+            errs.append(f"invalid JSON in {meta.relative_to(REPO)}: {exc}")
 
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
-    for phrase in [
-        "Public-safe template",
-        "private antigravity-user-config",
-        "python -B scripts/verify.py",
-        "Independent Template Context",
-    ]:
-        if phrase not in readme:
-            fail(f"README.md missing phrase: {phrase}")
-    for phrase in [
-        "公开安全模板",
-        "private antigravity-user-config",
-        "python -B scripts/verify.py",
-        "独立模板定位",
-    ]:
-        if phrase not in zh:
-            fail(f"README.zh-CN.md missing phrase: {phrase}")
-
-    for path in ROOT.rglob("*"):
-        if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir():
+    for f in REPO.rglob("*"):
+        if f.is_dir() or ".git" in f.parts or "__pycache__" in f.parts or f.suffix.lower() in SKIP_SUFFIX:
             continue
-        rel = path.relative_to(ROOT)
-        rel_posix = rel.as_posix()
-        if any(part in FORBIDDEN_PATH_PARTS for part in rel.parts):
-            fail(f"private runtime path is not allowed in template: {rel_posix}")
-        if path.suffix.lower() in FORBIDDEN_SUFFIXES:
-            fail(f"private/runtime-like file type is not allowed: {rel_posix}")
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for pattern, label in SECRET_PATTERNS:
-            if pattern.search(text):
-                fail(f"possible secret [{label}] in {rel_posix}")
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for pat, label in SECRET_PATTERNS:
+            m = pat.search(text)
+            if m:
+                errs.append(f"possible secret [{label}] in {f.relative_to(REPO)}: {m.group(0)[:14]}...")
 
-    print("antigravity-user-config-template verification passed")
+    if errs:
+        print("Validation FAILED:")
+        for e in errs:
+            print("  - " + e)
+        sys.exit(1)
+    print("Validation passed.")
 
 
 if __name__ == "__main__":

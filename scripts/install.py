@@ -3,9 +3,10 @@
 Cross-platform (Windows / macOS / Linux).
 
 Usage:
-  python -B scripts/install.py               # restore into ~/.gemini/config & ~/.gemini/antigravity-cli
-  python -B scripts/install.py --skip-rules  # restore settings/hooks/MCP without touching AGENTS.md / GEMINI.md
-  python -B scripts/install.py --dry-run     # preview changes without writing
+  python -B scripts/install.py                # restore full config + rules + global memory into ~/.gemini/
+  python -B scripts/install.py --skip-rules   # restore settings/hooks/MCP without touching AGENTS.md or personal memory
+  python -B scripts/install.py --skip-memory  # restore rules/settings/hooks/MCP without restoring memory/ & knowledge/
+  python -B scripts/install.py --dry-run      # preview changes without writing
 """
 from __future__ import annotations
 
@@ -23,10 +24,12 @@ REPO = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 GEMINI_DIR = HOME / ".gemini"
 CONFIG_DIR = GEMINI_DIR / "config"
+ANTIGRAVITY_DIR = GEMINI_DIR / "antigravity"
 CLI_DIR = GEMINI_DIR / "antigravity-cli"
 TS = datetime.now().strftime("%Y%m%d-%H%M%S")
 DRY = "--dry-run" in sys.argv[1:]
 SKIP_RULES = "--skip-rules" in sys.argv[1:]
+SKIP_MEMORY = "--skip-memory" in sys.argv[1:] or SKIP_RULES
 
 
 def default_projects_dir() -> str:
@@ -62,22 +65,28 @@ def copy_file(src: Path, dst: Path) -> None:
     print(f"  {src.relative_to(REPO)} -> {dst}")
 
 
-def copy_dir(src: Path, dst: Path) -> None:
+def copy_dir(src: Path, dst: Path, ignore_readme: bool = False, backup_existing: bool = True) -> int:
     if not src.exists():
-        return
+        return 0
     count = 0
     for item in sorted(src.rglob("*")):
         if not item.is_file():
             continue
-        target = dst / item.relative_to(src)
+        rel = item.relative_to(src)
+        if ignore_readme and rel.as_posix() == "README.md":
+            continue
+        target = dst / rel
         if not DRY:
             target.parent.mkdir(parents=True, exist_ok=True)
-        backup(target)
+        if backup_existing:
+            backup(target)
         if not DRY:
             shutil.copy2(item, target)
         count += 1
-    prefix = "[dry-run] " if DRY else ""
-    print(f"  {prefix}{src.relative_to(REPO)}/ -> {dst}/  ({count} files)")
+    if count > 0:
+        prefix = "[dry-run] " if DRY else ""
+        print(f"  {prefix}{src.relative_to(REPO)}/ -> {dst}/  ({count} files)")
+    return count
 
 
 def _strip_meta(d: dict) -> dict:
@@ -129,7 +138,7 @@ def main() -> None:
     user_home = str(HOME)
     projects_dir = default_projects_dir()
 
-    print(f"Installing Antigravity user config into: {GEMINI_DIR}" + ("   [DRY RUN — no writes]" if DRY else ""))
+    print(f"Installing Antigravity user config into: {GEMINI_DIR}" + ("   [DRY RUN -- no writes]" if DRY else ""))
     if not DRY:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CLI_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,7 +151,15 @@ def main() -> None:
     copy_file(REPO / "hooks.json", CONFIG_DIR / "hooks.json")
     copy_dir(REPO / "hooks", CONFIG_DIR / "hooks")
 
-    # 2. Render config/config.example.json -> ~/.gemini/config/config.json
+    # 2. Global memory (memory/ -> ~/.gemini/config/memory/) & Knowledge Items (knowledge/ -> Desktop & CLI)
+    if SKIP_MEMORY:
+        print("  [skip-memory] leaving global memory and knowledge items untouched")
+    else:
+        copy_dir(REPO / "memory", CONFIG_DIR / "memory", ignore_readme=True, backup_existing=False)
+        copy_dir(REPO / "knowledge", ANTIGRAVITY_DIR / "knowledge", ignore_readme=True, backup_existing=False)
+        copy_dir(REPO / "knowledge", CLI_DIR / "knowledge", ignore_readme=True, backup_existing=False)
+
+    # 3. Render config/config.example.json -> ~/.gemini/config/config.json
     cfg_template = json.loads((REPO / "config" / "config.example.json").read_text(encoding="utf-8"))
     if "userSettings" in cfg_template and isinstance(cfg_template["userSettings"], dict):
         if cfg_template["userSettings"].get("remoteControlHostname") == "__HOSTNAME__":
@@ -155,7 +172,7 @@ def main() -> None:
         cfg_target.write_text(json.dumps(cfg_template, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"  config/config.example.json -> {cfg_target}  (rendered hostname={hostname})")
 
-    # 3. Additive merge of MCP servers -> ~/.gemini/config/mcp_config.json
+    # 4. Additive merge of MCP servers -> ~/.gemini/config/mcp_config.json
     mcp_manifest = REPO / "config" / "mcp_config.example.json"
     mcp_target = CONFIG_DIR / "mcp_config.json"
     merged_mcp, added, kept, env_needed = merge_mcp_servers(mcp_manifest, mcp_target)
@@ -165,12 +182,12 @@ def main() -> None:
     else:
         mcp_target.write_text(json.dumps(merged_mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"  MCP servers merged into {mcp_target}")
-    print(f"    added:  {', '.join(added) if added else '(none — all already present)'}")
+    print(f"    added:  {', '.join(added) if added else '(none -- all already present)'}")
     print(f"    kept:   {', '.join(kept) if kept else '(none)'}")
     if env_needed:
         print(f"    set these env vars locally for added servers: {', '.join(env_needed)}")
 
-    # 4. Render config/cli-settings.example.json -> ~/.gemini/antigravity-cli/settings.json
+    # 5. Render config/cli-settings.example.json -> ~/.gemini/antigravity-cli/settings.json
     cli_template = json.loads((REPO / "config" / "cli-settings.example.json").read_text(encoding="utf-8"))
     workspaces = cli_template.get("trustedWorkspaces", [])
     rendered_ws = []
@@ -187,7 +204,7 @@ def main() -> None:
         cli_target.write_text(json.dumps(cli_template, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"  config/cli-settings.example.json -> {cli_target}  (rendered)")
 
-    print("\nDone." + (" (dry run — nothing was written)" if DRY else ""))
+    print("\nDone." + (" (dry run -- nothing was written)" if DRY else ""))
     print("Restart Antigravity / agy CLI to ensure all settings and hooks take effect.")
 
 
