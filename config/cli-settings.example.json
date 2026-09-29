@@ -1,6 +1,15 @@
 {
+  "allowNonWorkspaceAccess": true,
+  "artifactReviewPolicy": "always-proceed",
+  "enableTerminalSandbox": false,
+  "notifications": true,
+  "showFeedbackSurvey": false,
+  "showTips": false,
+  "toolPermission": "always-proceed",
   "trustedWorkspaces": [
     "__PROJECTS_DIR__",
     "__USER_HOME__"
-  ]
+  ],
+  "useG1Credits": false,
+  "verbosity": "high"
 }
