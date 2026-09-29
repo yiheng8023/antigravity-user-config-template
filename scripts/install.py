@@ -3,8 +3,9 @@
 Cross-platform (Windows / macOS / Linux).
 
 Usage:
-  python -B scripts/install.py            # restore into ~/.gemini/config & ~/.gemini/antigravity-cli
-  python -B scripts/install.py --dry-run  # preview changes without writing
+  python -B scripts/install.py               # restore into ~/.gemini/config & ~/.gemini/antigravity-cli
+  python -B scripts/install.py --skip-rules  # restore settings/hooks/MCP without touching AGENTS.md / GEMINI.md
+  python -B scripts/install.py --dry-run     # preview changes without writing
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ CONFIG_DIR = GEMINI_DIR / "config"
 CLI_DIR = GEMINI_DIR / "antigravity-cli"
 TS = datetime.now().strftime("%Y%m%d-%H%M%S")
 DRY = "--dry-run" in sys.argv[1:]
+SKIP_RULES = "--skip-rules" in sys.argv[1:]
 
 
 def default_projects_dir() -> str:
@@ -133,7 +135,10 @@ def main() -> None:
         CLI_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Global rules (AGENTS.md) and lifecycle hooks (hooks.json + hooks/)
-    copy_file(REPO / "AGENTS.md", CONFIG_DIR / "AGENTS.md")
+    if SKIP_RULES:
+        print("  [skip-rules] leaving existing AGENTS.md / GEMINI.md untouched")
+    else:
+        copy_file(REPO / "AGENTS.md", CONFIG_DIR / "AGENTS.md")
     copy_file(REPO / "hooks.json", CONFIG_DIR / "hooks.json")
     copy_dir(REPO / "hooks", CONFIG_DIR / "hooks")
 
