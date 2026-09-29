@@ -1,0 +1,17 @@
+{
+  "git-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./hooks/git-guard.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

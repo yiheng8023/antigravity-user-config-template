@@ -1,0 +1,5 @@
+antigravity-user-config-template
+
+This repository contains public-safe template material for building private Google Antigravity user-configuration repositories.
+
+Private configuration, personal memory, preferences, credentials, account state, runtime logs, local paths, and third-party restricted content are excluded from this public template and from any public license grant.

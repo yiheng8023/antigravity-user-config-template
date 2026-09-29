@@ -1,0 +1,41 @@
+{
+  "plugins": {
+    "chinese-toolkit": {
+      "enabled": true
+    },
+    "chrome-devtools-plugin": {
+      "enabled": true
+    },
+    "gemini-api": {
+      "enabled": true
+    },
+    "google-antigravity-sdk": {
+      "enabled": true
+    },
+    "modern-web-guidance-plugin": {
+      "enabled": true
+    }
+  },
+  "userSettings": {
+    "allowAgentAccessGitignoreFiles": true,
+    "allowAgentAccessNonWorkspaceFiles": true,
+    "allowCascadeAccessGitignoreFiles": true,
+    "artifactReviewMode": "ARTIFACT_REVIEW_MODE_TURBO",
+    "autoExecutionPolicy": "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",
+    "browserJsExecutionPolicy": "BROWSER_JS_EXECUTION_POLICY_TURBO",
+    "conversationWidth": "CONVERSATION_WIDTH_WIDE",
+    "disableDefaultCustomizations": false,
+    "enableNotificationsForSpecialEvents": true,
+    "enablePersonalCustomizations": true,
+    "enableSoundsForSpecialEvents": false,
+    "enableTerminalSandbox": false,
+    "globalPermissionGrants": {},
+    "internetAccessPolicy": "AGENT_SETTING_POLICY_ALLOW",
+    "nonWorkspaceFileAccessPolicy": "AGENT_SETTING_POLICY_ALLOW",
+    "permissionPreset": "AGENT_PERMISSION_PRESET_TURBO",
+    "queuedMessageDeliveryStrategy": "MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE",
+    "remoteControlEnabled": true,
+    "remoteControlHostname": "__HOSTNAME__",
+    "useAiCredits": false
+  }
+}
