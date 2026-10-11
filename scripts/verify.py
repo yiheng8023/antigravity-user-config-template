@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Verify repo structure, JSON validity, and scan committed text for accidental secrets."""
+"""Verify repo structure, JSON validity, memory completeness, and scan committed text for accidental secrets."""
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-EXPECTED = [
+
+def is_template_repo() -> bool:
+    return REPO.name.endswith("-template") or (REPO / "docs" / "public-private-boundary.md").exists()
+
+
+EXPECTED_BASE = [
     "AGENTS.md",
     "hooks.json",
     "hooks/git-guard.js",
@@ -27,6 +33,17 @@ EXPECTED = [
     "scripts/verify.py",
     "scripts/memory.py",
     "scripts/knowledge.py",
+]
+
+EXPECTED_TEMPLATE = [
+    "LICENSE",
+    "NOTICE",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "memory/README.md",
+    "docs/public-private-boundary.md",
+    "docs/private-repo-setup.md",
+    "docs/relationship-map.md",
 ]
 
 JSON_FILES = [
@@ -56,13 +73,51 @@ SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".ico", ".pdf", ".db", ".sqlite", ".pb"}
 
 def main() -> None:
     errs: list[str] = []
-    for rel in EXPECTED:
+    template_mode = is_template_repo()
+
+    for rel in EXPECTED_BASE:
         if not (REPO / rel).exists():
             errs.append(f"missing: {rel}")
 
-    if not ((REPO / "memory" / "MEMORY.md").exists() or (REPO / "memory" / "README.md").exists()):
-        errs.append("missing: memory/MEMORY.md or memory/README.md")
+    if template_mode:
+        for rel in EXPECTED_TEMPLATE:
+            if not (REPO / rel).exists():
+                errs.append(f"missing template file: {rel}")
 
+        # Ensure no personal memory files leaked into template
+        mem_dir = REPO / "memory"
+        if mem_dir.exists():
+            for f in mem_dir.glob("*.md"):
+                if f.name != "README.md":
+                    errs.append(f"Template repository must NOT contain personal memory file: {f.name}")
+
+        # Ensure no personal knowledge items leaked into template
+        k_dir = REPO / "knowledge"
+        if k_dir.exists():
+            for p in k_dir.iterdir():
+                if p.is_dir() or (p.is_file() and p.name != "README.md"):
+                    errs.append(f"Template repository must NOT contain personal knowledge item: {p.name}")
+
+        # Ensure no personal identity or paths in AGENTS.md
+        agents_path = REPO / "AGENTS.md"
+        if agents_path.exists():
+            agents_text = agents_path.read_text(encoding="utf-8")
+            if "宋华" in agents_text or "15521" in agents_text or "yiheng8023" in agents_text:
+                errs.append("Template AGENTS.md contains personal identity or private user path")
+    else:
+        # Private repo checks
+        if not (REPO / "memory" / "MEMORY.md").exists():
+            errs.append("missing: memory/MEMORY.md")
+        else:
+            # Cross-check that every memory/*.md is registered in MEMORY.md
+            memory_md_text = (REPO / "memory" / "MEMORY.md").read_text(encoding="utf-8")
+            for f in (REPO / "memory").glob("*.md"):
+                if f.name in ("MEMORY.md", "README.md"):
+                    continue
+                if f.name not in memory_md_text:
+                    errs.append(f"memory file {f.name} is not indexed in memory/MEMORY.md")
+
+    # JSON syntax validation
     for jrel in JSON_FILES:
         jpath = REPO / jrel
         if jpath.exists():
@@ -71,6 +126,7 @@ def main() -> None:
             except Exception as exc:
                 errs.append(f"invalid JSON in {jrel}: {exc}")
 
+    # Knowledge items metadata validation
     for meta in (REPO / "knowledge").glob("*/metadata.json"):
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))
@@ -79,6 +135,17 @@ def main() -> None:
         except Exception as exc:
             errs.append(f"invalid JSON in {meta.relative_to(REPO)}: {exc}")
 
+    # Check git-guard.js syntax via node --check
+    guard_js = REPO / "hooks" / "git-guard.js"
+    if guard_js.exists():
+        try:
+            res = subprocess.run(["node", "--check", str(guard_js)], capture_output=True, text=True)
+            if res.returncode != 0:
+                errs.append(f"JavaScript syntax error in hooks/git-guard.js: {res.stderr.strip()}")
+        except FileNotFoundError:
+            pass  # node not in PATH during CI step if node not installed; handled gracefully
+
+    # Secret scanning
     for f in REPO.rglob("*"):
         if f.is_dir() or ".git" in f.parts or "__pycache__" in f.parts or f.suffix.lower() in SKIP_SUFFIX:
             continue
@@ -96,7 +163,7 @@ def main() -> None:
         for e in errs:
             print("  - " + e)
         sys.exit(1)
-    print("Validation passed.")
+    print(f"Validation passed ({'template' if template_mode else 'private'} mode).")
 
 
 if __name__ == "__main__":

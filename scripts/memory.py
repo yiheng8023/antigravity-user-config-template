@@ -128,6 +128,10 @@ def sync(src: Path, dst: Path, direction: str, ignore_readme: bool = False) -> N
     )
 
 
+def _is_template_repo() -> bool:
+    return REPO.name.endswith("-template") or (REPO / "docs" / "public-private-boundary.md").exists()
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if a != "--dry-run"]
     if len(args) != 1 or args[0] not in ("--backup", "--restore", "--status"):
@@ -137,6 +141,10 @@ def main() -> None:
     if cmd == "--status":
         status()
     elif cmd == "--backup":
+        if _is_template_repo():
+            print("ABORT: Cannot run --backup in a template repository (public-safe boundary).")
+            print("Real memory files must be backed up to your private repository only.")
+            sys.exit(1)
         sync(LIVE_MEM, REPO_MEM, "backup", ignore_readme=True)
     elif cmd == "--restore":
         sync(REPO_MEM, LIVE_MEM, "restore", ignore_readme=True)

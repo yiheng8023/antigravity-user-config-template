@@ -1,3 +1,4 @@
+# Secrets and credentials — never commit
 .env
 .env.*
 *.key
@@ -9,8 +10,28 @@
 .credentials.json
 auth.json
 credentials.json
+
+# Real machine-specific config (only the *.example.* templates are committed)
 settings.json
+config.json
+mcp_config.json
+cli-settings.json
+config/config.json
+config/mcp_config.json
+config/cli-settings.json
 .claude.json
+!*.example.json
+
+# Template safety boundary: ignore any real memory or knowledge items
+memory/*
+!memory/README.md
+knowledge/*
+!knowledge/README.md
+
+# Antigravity runtime state, locks & installer backups
+*.lock
+*.bak
+*.bak-*
 projects/
 sessions/
 shell-snapshots/
@@ -18,13 +39,20 @@ session-env/
 telemetry/
 cache/
 backups/
+tasks/
+plans/
+ide/
 history.jsonl
 *.log
 *.sqlite
 *.sqlite-*
 *.db
+
+# Python
 __pycache__/
 *.py[cod]
+
+# OS / editor
 .DS_Store
 Thumbs.db
 .vscode/

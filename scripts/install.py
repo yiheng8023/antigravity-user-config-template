@@ -72,6 +72,8 @@ def copy_dir(src: Path, dst: Path, ignore_readme: bool = False, backup_existing:
     for item in sorted(src.rglob("*")):
         if not item.is_file():
             continue
+        if item.name in (".DS_Store", "Thumbs.db") or item.name.endswith(".lock") or ".bak" in item.name:
+            continue
         rel = item.relative_to(src)
         if ignore_readme and rel.as_posix() == "README.md":
             continue
@@ -159,18 +161,45 @@ def main() -> None:
         copy_dir(REPO / "knowledge", ANTIGRAVITY_DIR / "knowledge", ignore_readme=True, backup_existing=False)
         copy_dir(REPO / "knowledge", CLI_DIR / "knowledge", ignore_readme=True, backup_existing=False)
 
-    # 3. Render config/config.example.json -> ~/.gemini/config/config.json
+    # 3. Additive merge config/config.example.json -> ~/.gemini/config/config.json
     cfg_template = json.loads((REPO / "config" / "config.example.json").read_text(encoding="utf-8"))
-    if "userSettings" in cfg_template and isinstance(cfg_template["userSettings"], dict):
-        if cfg_template["userSettings"].get("remoteControlHostname") == "__HOSTNAME__":
-            cfg_template["userSettings"]["remoteControlHostname"] = hostname
     cfg_target = CONFIG_DIR / "config.json"
+    existing_cfg = {}
+    if cfg_target.exists():
+        try:
+            existing_cfg = json.loads(cfg_target.read_text(encoding="utf-8"))
+        except Exception:
+            existing_cfg = {}
+
+    custom_host = existing_cfg.get("userSettings", {}).get("remoteControlHostname")
+    effective_host = custom_host if (custom_host and custom_host != "__HOSTNAME__") else hostname
+
+    merged_settings = dict(cfg_template.get("userSettings", {}))
+    if isinstance(existing_cfg.get("userSettings"), dict):
+        merged_settings.update(existing_cfg["userSettings"])
+        for k, v in cfg_template.get("userSettings", {}).items():
+            if k not in merged_settings or k.endswith("Policy") or k.startswith("allow") or k.startswith("artifact") or k.startswith("permission"):
+                merged_settings[k] = v
+    merged_settings["remoteControlHostname"] = effective_host
+
+    merged_plugins = dict(existing_cfg.get("plugins", {})) if isinstance(existing_cfg.get("plugins"), dict) else {}
+    for p_name, p_val in cfg_template.get("plugins", {}).items():
+        if p_name in merged_plugins and isinstance(merged_plugins[p_name], dict):
+            merged_plugins[p_name]["enabled"] = True
+        else:
+            merged_plugins[p_name] = dict(p_val)
+
+    final_cfg = {
+        "plugins": merged_plugins,
+        "userSettings": merged_settings,
+    }
+
     backup(cfg_target)
     if DRY:
-        print(f"  [dry-run] config/config.example.json -> {cfg_target}  (rendered hostname={hostname})")
+        print(f"  [dry-run] config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
     else:
-        cfg_target.write_text(json.dumps(cfg_template, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"  config/config.example.json -> {cfg_target}  (rendered hostname={hostname})")
+        cfg_target.write_text(json.dumps(final_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"  config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
 
     # 4. Additive merge of MCP servers -> ~/.gemini/config/mcp_config.json
     mcp_manifest = REPO / "config" / "mcp_config.example.json"
@@ -189,19 +218,37 @@ def main() -> None:
 
     # 5. Render config/cli-settings.example.json -> ~/.gemini/antigravity-cli/settings.json
     cli_template = json.loads((REPO / "config" / "cli-settings.example.json").read_text(encoding="utf-8"))
+    cli_target = CLI_DIR / "settings.json"
+    existing_cli = {}
+    if cli_target.exists():
+        try:
+            existing_cli = json.loads(cli_target.read_text(encoding="utf-8"))
+        except Exception:
+            existing_cli = {}
+
     workspaces = cli_template.get("trustedWorkspaces", [])
     rendered_ws = []
     for w in workspaces:
         val = str(w).replace("__PROJECTS_DIR__", projects_dir).replace("__USER_HOME__", user_home)
         if val not in rendered_ws:
             rendered_ws.append(val)
-    cli_template["trustedWorkspaces"] = rendered_ws
-    cli_target = CLI_DIR / "settings.json"
+    if isinstance(existing_cli.get("trustedWorkspaces"), list):
+        for ew in existing_cli["trustedWorkspaces"]:
+            if ew not in rendered_ws:
+                rendered_ws.append(ew)
+
+    final_cli = dict(cli_template)
+    final_cli.update(existing_cli)
+    for k, v in cli_template.items():
+        if k not in final_cli:
+            final_cli[k] = v
+    final_cli["trustedWorkspaces"] = rendered_ws
+
     backup(cli_target)
     if DRY:
         print(f"  [dry-run] config/cli-settings.example.json -> {cli_target}  (rendered)")
     else:
-        cli_target.write_text(json.dumps(cli_template, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        cli_target.write_text(json.dumps(final_cli, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"  config/cli-settings.example.json -> {cli_target}  (rendered)")
 
     print("\nDone." + (" (dry run -- nothing was written)" if DRY else ""))

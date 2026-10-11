@@ -19,8 +19,22 @@ try {
   payload = JSON.parse(raw || '{}');
 } catch (_) {}
 
-const args = (payload.toolCall && payload.toolCall.args) || {};
-const cmd = String(args.CommandLine || args.commandLine || args.command || '');
+const args = (payload.toolCall && payload.toolCall.args)
+  || (payload.tool_call && payload.tool_call.args)
+  || (payload.toolUse && payload.toolUse.args)
+  || payload.args
+  || payload
+  || {};
+const cmd = String(
+  args.CommandLine
+  || args.commandLine
+  || args.command
+  || args.cmd
+  || payload.CommandLine
+  || payload.command
+  || payload.cmd
+  || ''
+);
 
 const dangerPatterns = [
   { re: /git\s+push\b[^\n]*--force(?!-with-lease)/i, msg: 'git push --force (会覆盖远端历史，建议改用 --force-with-lease)' },
@@ -28,10 +42,10 @@ const dangerPatterns = [
   { re: /git\s+push\b[^\n]*--delete/i, msg: 'git push --delete (删除远端分支/标签)' },
   { re: /git\s+push\b\s+\S+\s+:[^\s]+/i, msg: 'git push origin :branch (删除远端分支)' },
   { re: /git\s+reset\b[^\n]*--hard/i, msg: 'git reset --hard (丢弃工作区与暂存区改动)' },
-  { re: /git\s+clean\b[^\n]*-[a-zA-Z]*f/i, msg: 'git clean -f (永久删除未跟踪文件)' },
-  { re: /git\s+branch\b[^\n]*\s-D\b/, msg: 'git branch -D (强制删除未合并分支)' },
+  { re: /git\s+clean\b[^\n]*(?:-[a-zA-Z]*f|--force)/i, msg: 'git clean -f/--force (永久删除未跟踪文件)' },
+  { re: /git\s+branch\b[^\n]*(?:\s-D\b|--delete\s+--force\b)/i, msg: 'git branch -D (强制删除未合并分支)' },
   { re: /git\s+checkout\b[^\n]*\s--\s+\S/i, msg: 'git checkout -- <file> (丢弃工作区文件改动)' },
-  { re: /git\s+restore\b[^\n]*--worktree/i, msg: 'git restore --worktree (丢弃工作区改动)' },
+  { re: /git\s+restore\b[^\n]*(?:\s-W\b|--worktree)/i, msg: 'git restore --worktree (丢弃工作区改动)' },
   { re: /git\s+reflog\b[^\n]*delete/i, msg: 'git reflog delete (抹除 reflog 恢复记录)' },
   { re: /git\s+update-ref\b[^\n]*\s-d\b/i, msg: 'git update-ref -d (直接删除 Git 引用)' },
   { re: /git\s+filter-branch\b/i, msg: 'git filter-branch (大规模重写历史)' },
