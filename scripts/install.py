@@ -10,6 +10,7 @@ Usage:
 """
 from __future__ import annotations
 
+import filecmp
 import json
 import os
 import platform
@@ -55,6 +56,9 @@ def backup(target: Path) -> None:
 
 
 def copy_file(src: Path, dst: Path) -> None:
+    if dst.exists() and filecmp.cmp(src, dst, shallow=False):
+        print(f"  {src.relative_to(REPO)} -> {dst}  (already up to date)")
+        return
     if not DRY:
         dst.parent.mkdir(parents=True, exist_ok=True)
     backup(dst)
@@ -78,6 +82,8 @@ def copy_dir(src: Path, dst: Path, ignore_readme: bool = False, backup_existing:
         if ignore_readme and rel.as_posix() == "README.md":
             continue
         target = dst / rel
+        if target.exists() and filecmp.cmp(item, target, shallow=False):
+            continue
         if not DRY:
             target.parent.mkdir(parents=True, exist_ok=True)
         if backup_existing:
@@ -87,7 +93,7 @@ def copy_dir(src: Path, dst: Path, ignore_readme: bool = False, backup_existing:
         count += 1
     if count > 0:
         prefix = "[dry-run] " if DRY else ""
-        print(f"  {prefix}{src.relative_to(REPO)}/ -> {dst}/  ({count} files)")
+        print(f"  {prefix}{src.relative_to(REPO)}/ -> {dst}/  ({count} updated files)")
     return count
 
 
@@ -189,28 +195,40 @@ def main() -> None:
         else:
             merged_plugins[p_name] = dict(p_val)
 
-    final_cfg = {
-        "plugins": merged_plugins,
-        "userSettings": merged_settings,
-    }
+    final_cfg = dict(existing_cfg) if isinstance(existing_cfg, dict) else {}
+    final_cfg["plugins"] = merged_plugins
+    final_cfg["userSettings"] = merged_settings
 
-    backup(cfg_target)
-    if DRY:
-        print(f"  [dry-run] config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
+    if cfg_target.exists() and existing_cfg == final_cfg:
+        print(f"  config/config.example.json -> {cfg_target}  (already up to date, hostname={effective_host})")
     else:
-        cfg_target.write_text(json.dumps(final_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"  config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
+        backup(cfg_target)
+        if DRY:
+            print(f"  [dry-run] config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
+        else:
+            cfg_target.write_text(json.dumps(final_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"  config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
 
     # 4. Additive merge of MCP servers -> ~/.gemini/config/mcp_config.json
     mcp_manifest = REPO / "config" / "mcp_config.example.json"
     mcp_target = CONFIG_DIR / "mcp_config.json"
     merged_mcp, added, kept, env_needed = merge_mcp_servers(mcp_manifest, mcp_target)
-    backup(mcp_target)
-    if DRY:
-        print(f"  [dry-run] would merge MCP servers into {mcp_target}")
+    existing_mcp = {}
+    if mcp_target.exists():
+        try:
+            existing_mcp = json.loads(mcp_target.read_text(encoding="utf-8"))
+        except Exception:
+            existing_mcp = {}
+
+    if mcp_target.exists() and not added and existing_mcp == merged_mcp:
+        print(f"  MCP servers in {mcp_target}  (all up to date)")
     else:
-        mcp_target.write_text(json.dumps(merged_mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"  MCP servers merged into {mcp_target}")
+        backup(mcp_target)
+        if DRY:
+            print(f"  [dry-run] would merge MCP servers into {mcp_target}")
+        else:
+            mcp_target.write_text(json.dumps(merged_mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"  MCP servers merged into {mcp_target}")
     print(f"    added:  {', '.join(added) if added else '(none -- all already present)'}")
     print(f"    kept:   {', '.join(kept) if kept else '(none)'}")
     if env_needed:
@@ -244,12 +262,15 @@ def main() -> None:
             final_cli[k] = v
     final_cli["trustedWorkspaces"] = rendered_ws
 
-    backup(cli_target)
-    if DRY:
-        print(f"  [dry-run] config/cli-settings.example.json -> {cli_target}  (rendered)")
+    if cli_target.exists() and existing_cli == final_cli:
+        print(f"  config/cli-settings.example.json -> {cli_target}  (already up to date)")
     else:
-        cli_target.write_text(json.dumps(final_cli, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"  config/cli-settings.example.json -> {cli_target}  (rendered)")
+        backup(cli_target)
+        if DRY:
+            print(f"  [dry-run] config/cli-settings.example.json -> {cli_target}  (rendered)")
+        else:
+            cli_target.write_text(json.dumps(final_cli, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"  config/cli-settings.example.json -> {cli_target}  (rendered)")
 
     print("\nDone." + (" (dry run -- nothing was written)" if DRY else ""))
     print("Restart Antigravity / agy CLI to ensure all settings and hooks take effect.")

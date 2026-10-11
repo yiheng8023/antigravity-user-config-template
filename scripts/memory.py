@@ -29,6 +29,10 @@ SECRET_PATTERNS = [
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "GitHub fine-grained PAT"),
     (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "JWT"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key block"),
+    (
+        re.compile(r'"(?:password|secret|token|api[_-]?key)"\s*:\s*"(?!<SET_LOCALLY>|__|\$\{|<)[^"]{6,}"', re.I),
+        "credential-looking JSON value",
+    ),
 ]
 
 

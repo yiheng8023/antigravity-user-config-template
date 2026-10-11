@@ -83,10 +83,11 @@ def status() -> None:
     print(f"Summary: {same} fully synchronized, {diff} modified, {missing} missing in some tiers.")
 
 
-def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False) -> int:
+def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False, prune_stale: bool = False) -> int:
     if not src.exists():
         return 0
     count = 0
+    src_files: set[str] = set()
     for item in sorted(src.rglob("*")):
         if not item.is_file():
             continue
@@ -95,11 +96,31 @@ def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False) -> int
         rel = item.relative_to(src)
         if ignore_readme and rel.as_posix() == "README.md":
             continue
+        src_files.add(rel.as_posix())
         target = dst / rel
+        if target.exists() and filecmp.cmp(item, target, shallow=False):
+            continue
         if not DRY:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
         count += 1
+
+    if prune_stale and dst.exists():
+        for item in sorted(dst.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(dst).as_posix()
+            if rel == "README.md":
+                continue
+            if rel not in src_files:
+                if not DRY:
+                    item.unlink()
+                print(f"  {'[dry-run] ' if DRY else ''}pruned stale in repo: {rel}")
+        if not DRY:
+            for d in sorted(dst.rglob("*"), reverse=True):
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+
     return count
 
 
@@ -118,12 +139,19 @@ def main() -> None:
             print("ABORT: Cannot run --backup in a template repository (public-safe boundary).")
             print("Real knowledge items must be backed up to your private repository only.")
             sys.exit(1)
-        n = copy_tree_contents(LIVE_DESKTOP_KNOWLEDGE, REPO_KNOWLEDGE, ignore_readme=False)
-        print(f"{tag}Backed up {n} file(s) from {LIVE_DESKTOP_KNOWLEDGE} -> {REPO_KNOWLEDGE}")
+        # Check drift between Desktop and CLI before backup
+        desk_files = _tree_files(LIVE_DESKTOP_KNOWLEDGE)
+        cli_files = _tree_files(LIVE_CLI_KNOWLEDGE)
+        diff_keys = [k for k in set(desk_files) & set(cli_files) if not filecmp.cmp(desk_files[k], cli_files[k], shallow=False)]
+        if diff_keys:
+            print(f"WARNING: Knowledge drift detected between Desktop and CLI for {len(diff_keys)} item(s): {', '.join(diff_keys)}")
+            print("Backing up from Desktop as primary baseline; consider running --restore afterward to resynchronize.")
+        n = copy_tree_contents(LIVE_DESKTOP_KNOWLEDGE, REPO_KNOWLEDGE, ignore_readme=False, prune_stale=True)
+        print(f"{tag}Backed up {n} updated file(s) from {LIVE_DESKTOP_KNOWLEDGE} -> {REPO_KNOWLEDGE}")
     else:
         n_desk = copy_tree_contents(REPO_KNOWLEDGE, LIVE_DESKTOP_KNOWLEDGE, ignore_readme=True)
         n_cli = copy_tree_contents(REPO_KNOWLEDGE, LIVE_CLI_KNOWLEDGE, ignore_readme=True)
-        print(f"{tag}Restored {n_desk} file(s) -> {LIVE_DESKTOP_KNOWLEDGE} and {n_cli} file(s) -> {LIVE_CLI_KNOWLEDGE}")
+        print(f"{tag}Restored {n_desk} updated file(s) -> {LIVE_DESKTOP_KNOWLEDGE} and {n_cli} updated file(s) -> {LIVE_CLI_KNOWLEDGE}")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ EXPECTED_BASE = [
     "AGENTS.md",
     "hooks.json",
     "hooks/git-guard.js",
+    "hooks/README.md",
     "knowledge/README.md",
     "config/config.example.json",
     "config/mcp_config.example.json",
@@ -45,6 +46,27 @@ EXPECTED_TEMPLATE = [
     "docs/private-repo-setup.md",
     "docs/relationship-map.md",
 ]
+
+FORBIDDEN_TEMPLATE_PARTS = {
+    "projects",
+    "conversations",
+    "brain",
+    "crashes",
+    "cache",
+    "backups",
+}
+
+FORBIDDEN_TEMPLATE_SUFFIXES = {
+    ".db",
+    ".sqlite",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".log",
+    ".pb",
+    ".pbtxt",
+}
 
 JSON_FILES = [
     "hooks.json",
@@ -84,6 +106,26 @@ def main() -> None:
             if not (REPO / rel).exists():
                 errs.append(f"missing template file: {rel}")
 
+        # Required README phrasing checks
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        zh = (REPO / "README.zh-CN.md").read_text(encoding="utf-8")
+        for phrase in [
+            "Public-safe template",
+            "private antigravity-user-config",
+            "python -B scripts/verify.py",
+            "Independent Template Context",
+        ]:
+            if phrase not in readme:
+                errs.append(f"Template README.md missing phrase: {phrase}")
+        for phrase in [
+            "公开安全模板",
+            "private antigravity-user-config",
+            "python -B scripts/verify.py",
+            "独立模板定位",
+        ]:
+            if phrase not in zh:
+                errs.append(f"Template README.zh-CN.md missing phrase: {phrase}")
+
         # Ensure no personal memory files leaked into template
         mem_dir = REPO / "memory"
         if mem_dir.exists():
@@ -98,18 +140,39 @@ def main() -> None:
                 if p.is_dir() or (p.is_file() and p.name != "README.md"):
                     errs.append(f"Template repository must NOT contain personal knowledge item: {p.name}")
 
-        # Ensure no personal identity or paths in AGENTS.md
-        agents_path = REPO / "AGENTS.md"
-        if agents_path.exists():
-            agents_text = agents_path.read_text(encoding="utf-8")
-            if "宋华" in agents_text or "15521" in agents_text or "yiheng8023" in agents_text:
-                errs.append("Template AGENTS.md contains personal identity or private user path")
+        # Ensure no forbidden runtime paths or sensitive file types exist in template
+        for path in REPO.rglob("*"):
+            if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir():
+                continue
+            rel = path.relative_to(REPO)
+            if any(part in FORBIDDEN_TEMPLATE_PARTS for part in rel.parts):
+                errs.append(f"Template contains forbidden runtime path: {rel.as_posix()}")
+            if path.suffix.lower() in FORBIDDEN_TEMPLATE_SUFFIXES:
+                errs.append(f"Template contains forbidden file type: {rel.as_posix()}")
+
+        # Ensure no personal identity or paths in ANY file in template (excluding verify.py where checked)
+        for path in REPO.rglob("*"):
+            if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir():
+                continue
+            rel = path.relative_to(REPO)
+            if rel.as_posix() == "scripts/verify.py":
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+                if "宋华" in content:
+                    errs.append(f"Template file {rel.as_posix()} contains personal identity [宋华]")
+                if "15521" in content:
+                    errs.append(f"Template file {rel.as_posix()} contains private user path [15521]")
+                if rel.as_posix() == "AGENTS.md" and "yiheng8023" in content:
+                    errs.append(f"Template AGENTS.md contains personal handle [yiheng8023]")
+            except Exception:
+                pass
     else:
         # Private repo checks
         if not (REPO / "memory" / "MEMORY.md").exists():
             errs.append("missing: memory/MEMORY.md")
         else:
-            # Cross-check that every memory/*.md is registered in MEMORY.md
+            # Cross-check that every memory/*.md is registered in memory/MEMORY.md
             memory_md_text = (REPO / "memory" / "MEMORY.md").read_text(encoding="utf-8")
             for f in (REPO / "memory").glob("*.md"):
                 if f.name in ("MEMORY.md", "README.md"):
