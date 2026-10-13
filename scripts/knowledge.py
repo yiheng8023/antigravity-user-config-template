@@ -115,7 +115,7 @@ def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False, prune_
             if rel not in src_files:
                 if not DRY:
                     item.unlink()
-                print(f"  {'[dry-run] ' if DRY else ''}pruned stale in repo: {rel}")
+                print(f"  {'[dry-run] ' if DRY else ''}pruned stale in target: {rel}")
         if not DRY:
             for d in sorted(dst.rglob("*"), reverse=True):
                 if d.is_dir() and not any(d.iterdir()):

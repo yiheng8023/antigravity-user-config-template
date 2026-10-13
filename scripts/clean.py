@@ -30,6 +30,8 @@ TEMP_FILE_EXTENSIONS = {
     ".pyd",
     ".swp",
     ".swo",
+    ".orig",
+    ".rej",
 }
 
 TEMP_FILE_NAMES = {
@@ -67,8 +69,12 @@ def clean_repo(repo_dir: Path) -> tuple[int, int]:
         if p.name in TEMP_DIR_NAMES:
             if not DRY:
                 shutil.rmtree(p, ignore_errors=True)
-            deleted_dirs += 1
-            _log(f"  {tag}removed directory: {p.relative_to(repo_dir)}", deleted_files + deleted_dirs)
+                if not p.exists():
+                    deleted_dirs += 1
+                    _log(f"  {tag}removed directory: {p.relative_to(repo_dir)}", deleted_files + deleted_dirs)
+            else:
+                deleted_dirs += 1
+                _log(f"  {tag}removed directory: {p.relative_to(repo_dir)}", deleted_files + deleted_dirs)
 
     # 2. Clean temp files
     for p in sorted(repo_dir.rglob("*")):
@@ -78,15 +84,20 @@ def clean_repo(repo_dir: Path) -> tuple[int, int]:
             p.name in TEMP_FILE_NAMES
             or p.suffix.lower() in TEMP_FILE_EXTENSIONS
             or ".bak-" in p.name
+            or p.name.endswith("~")
+            or (p.name.startswith("#") and p.name.endswith("#"))
         )
         if is_temp:
             if not DRY:
                 try:
                     p.unlink()
+                    deleted_files += 1
+                    _log(f"  {tag}removed temp file:  {p.relative_to(repo_dir)}", deleted_files + deleted_dirs)
                 except OSError:
                     pass
-            deleted_files += 1
-            _log(f"  {tag}removed temp file:  {p.relative_to(repo_dir)}", deleted_files + deleted_dirs)
+            else:
+                deleted_files += 1
+                _log(f"  {tag}removed temp file:  {p.relative_to(repo_dir)}", deleted_files + deleted_dirs)
 
     return deleted_files, deleted_dirs
 
@@ -101,21 +112,48 @@ def clean_runtime(gemini_dir: Path) -> tuple[int, int]:
 
     print(f"\nScanning Antigravity runtime environment ({gemini_dir})...")
 
-    # 1. Transient installer backup files (.bak, .bak-*, .tmp) in config dirs
+    # 1. Transient installer backup files (.bak, .bak-*, .tmp) across config and runtime dirs (recursive)
     for cfg_dir in [gemini_dir / "config", gemini_dir / "antigravity-cli", gemini_dir / "antigravity"]:
         if not cfg_dir.exists():
             continue
-        for item in sorted(cfg_dir.iterdir()):
-            if not item.is_file():
+        for item in sorted(cfg_dir.rglob("*")):
+            if not item.is_file() or ".git" in item.parts:
                 continue
-            if item.suffix.lower() in (".tmp", ".temp", ".bak") or ".bak-" in item.name:
+            if (
+                item.suffix.lower() in (".tmp", ".temp", ".bak", ".orig", ".rej")
+                or ".bak-" in item.name
+                or item.name.endswith("~")
+            ):
                 if not DRY:
                     try:
                         item.unlink()
+                        deleted_files += 1
+                        _log(f"  {tag}pruned runtime backup/temp:  {item}", deleted_files + deleted_dirs)
                     except OSError:
                         pass
-                deleted_files += 1
-                _log(f"  {tag}pruned runtime backup/temp:  {item}", deleted_files + deleted_dirs)
+                else:
+                    deleted_files += 1
+                    _log(f"  {tag}pruned runtime backup/temp:  {item}", deleted_files + deleted_dirs)
+
+    # 2. Crash dump logs (.log, .dmp) in crashes/
+    crash_dirs = [
+        gemini_dir / "antigravity" / "crashes",
+        gemini_dir / "antigravity-cli" / "crashes",
+    ]
+    for c_dir in crash_dirs:
+        if c_dir.exists() and c_dir.is_dir():
+            for item in sorted(c_dir.iterdir()):
+                if item.is_file() and (item.name.startswith("crash_") or item.suffix.lower() in (".dmp", ".log", ".tmp")):
+                    if not DRY:
+                        try:
+                            item.unlink()
+                            deleted_files += 1
+                            _log(f"  {tag}pruned runtime crash log:    {item}", deleted_files + deleted_dirs)
+                        except OSError:
+                            pass
+                    else:
+                        deleted_files += 1
+                        _log(f"  {tag}pruned runtime crash log:    {item}", deleted_files + deleted_dirs)
 
     scratch_targets = [
         gemini_dir / "antigravity" / "scratch",
@@ -131,15 +169,22 @@ def clean_runtime(gemini_dir: Path) -> tuple[int, int]:
                     if not DRY:
                         try:
                             item.unlink()
+                            deleted_files += 1
+                            _log(f"  {tag}pruned runtime scratch file: {item}", deleted_files + deleted_dirs)
                         except OSError:
                             pass
-                    deleted_files += 1
-                    _log(f"  {tag}pruned runtime scratch file: {item}", deleted_files + deleted_dirs)
+                    else:
+                        deleted_files += 1
+                        _log(f"  {tag}pruned runtime scratch file: {item}", deleted_files + deleted_dirs)
                 elif item.is_dir():
                     if not DRY:
                         shutil.rmtree(item, ignore_errors=True)
-                    deleted_dirs += 1
-                    _log(f"  {tag}pruned runtime scratch dir:  {item}", deleted_files + deleted_dirs)
+                        if not item.exists():
+                            deleted_dirs += 1
+                            _log(f"  {tag}pruned runtime scratch dir:  {item}", deleted_files + deleted_dirs)
+                    else:
+                        deleted_dirs += 1
+                        _log(f"  {tag}pruned runtime scratch dir:  {item}", deleted_files + deleted_dirs)
 
     for brain_root in [gemini_dir / "antigravity" / "brain", gemini_dir / "antigravity-cli" / "brain"]:
         if not brain_root.exists():
@@ -154,21 +199,32 @@ def clean_runtime(gemini_dir: Path) -> tuple[int, int]:
                         if not DRY:
                             try:
                                 item.unlink()
+                                deleted_files += 1
+                                _log(f"  {tag}pruned session scratch file: {item}", deleted_files + deleted_dirs)
                             except OSError:
                                 pass
-                        deleted_files += 1
-                        _log(f"  {tag}pruned session scratch file: {item}", deleted_files + deleted_dirs)
+                        else:
+                            deleted_files += 1
+                            _log(f"  {tag}pruned session scratch file: {item}", deleted_files + deleted_dirs)
                     elif item.is_dir():
                         if not DRY:
                             shutil.rmtree(item, ignore_errors=True)
-                        deleted_dirs += 1
-                        _log(f"  {tag}pruned session scratch dir:  {item}", deleted_files + deleted_dirs)
+                            if not item.exists():
+                                deleted_dirs += 1
+                                _log(f"  {tag}pruned session scratch dir:  {item}", deleted_files + deleted_dirs)
+                        else:
+                            deleted_dirs += 1
+                            _log(f"  {tag}pruned session scratch dir:  {item}", deleted_files + deleted_dirs)
             t_dir = session_dir / ".tempmediaStorage"
             if t_dir.exists() and t_dir.is_dir():
                 if not DRY:
                     shutil.rmtree(t_dir, ignore_errors=True)
-                deleted_dirs += 1
-                _log(f"  {tag}pruned session temp media:   {t_dir}", deleted_files + deleted_dirs)
+                    if not t_dir.exists():
+                        deleted_dirs += 1
+                        _log(f"  {tag}pruned session temp media:   {t_dir}", deleted_files + deleted_dirs)
+                else:
+                    deleted_dirs += 1
+                    _log(f"  {tag}pruned session temp media:   {t_dir}", deleted_files + deleted_dirs)
 
     return deleted_files, deleted_dirs
 

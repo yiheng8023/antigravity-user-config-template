@@ -180,18 +180,24 @@ def main() -> None:
                     continue
                 if f.name not in memory_md_text:
                     errs.append(f"memory file {f.name} is not indexed in memory/MEMORY.md")
-            # Cross-check that every link in MEMORY.md resolves to an existing file
-            for linked in re.findall(r"\]\(([A-Za-z0-9._\-]+\.md)\)", memory_md_text):
+            # Cross-check that every link in MEMORY.md resolves to an existing file (robust against anchors & path prefixes)
+            for linked in re.findall(r"\]\((?:[^)\s#]*/)?([A-Za-z0-9._\-]+\.md)(?:#[^)\s]*)?\)", memory_md_text):
                 if not (REPO / "memory" / linked).exists():
                     errs.append(f"memory/MEMORY.md references non-existent stale file: {linked}")
             # Cross-check that every memory link in AGENTS.md resolves to an existing file
             agents_text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+            mem_index_match = re.search(r"<!-- GLOBAL_MEMORY_START -->(.*?)<!-- GLOBAL_MEMORY_END -->", agents_text, re.DOTALL)
+            if mem_index_match:
+                mem_index_text = mem_index_match.group(1)
+                for linked in re.findall(r"\]\((?:[^)\s#]*/)?([A-Za-z0-9._\-]+\.md)(?:#[^)\s]*)?\)", mem_index_text):
+                    if not (REPO / "memory" / linked).exists():
+                        errs.append(f"AGENTS.md Global Memory Index references non-existent stale file: {linked}")
             for linked in re.findall(r"\.gemini/config/memory/([A-Za-z0-9._\-]+\.md)", agents_text):
                 if not (REPO / "memory" / linked).exists():
-                    errs.append(f"AGENTS.md Global Memory Index references non-existent stale file: {linked}")
+                    errs.append(f"AGENTS.md references non-existent stale memory file: {linked}")
 
     # Zero-leftover temporary artifact check across the repository
-    temp_suffixes = {".tmp", ".temp", ".bak", ".swp", ".swo", ".pyc", ".pyo"}
+    temp_suffixes = {".tmp", ".temp", ".bak", ".swp", ".swo", ".pyc", ".pyo", ".pyd", ".orig", ".rej"}
     for path in REPO.rglob("*"):
         if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir():
             continue
@@ -199,6 +205,8 @@ def main() -> None:
             path.name in (".DS_Store", "Thumbs.db")
             or path.suffix.lower() in temp_suffixes
             or ".bak-" in path.name
+            or path.name.endswith("~")
+            or (path.name.startswith("#") and path.name.endswith("#"))
         ):
             errs.append(f"leftover temporary artifact found: {path.relative_to(REPO).as_posix()} (run scripts/clean.py)")
 
