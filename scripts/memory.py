@@ -116,13 +116,12 @@ def sync(src: Path, dst: Path, direction: str, ignore_readme: bool = False) -> N
         copied += 1
 
     removed = 0
-    if direction == "backup":
-        for name, target in dst_files.items():
-            if name not in src_files:
-                if not DRY:
-                    target.unlink()
-                print(f"  {tag}pruned stale in repo: {name}")
-                removed += 1
+    for name, target in dst_files.items():
+        if name not in src_files:
+            if not DRY:
+                target.unlink()
+            print(f"  {tag}pruned stale in {direction} target: {name}")
+            removed += 1
 
     print(
         f"{tag}{direction.capitalize()} complete: {copied} updated, "

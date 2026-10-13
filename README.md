@@ -42,4 +42,4 @@ The template may be public. Your real configuration repository should remain pri
 - `config/config.example.json`: sanitized full-power `~/.gemini/config/config.json` template (`__HOSTNAME__` placeholder)
 - `config/mcp_config.example.json`: sanitized `~/.gemini/config/mcp_config.json` template
 - `config/cli-settings.example.json`: sanitized `~/.gemini/antigravity-cli/settings.json` template (`__PROJECTS_DIR__`, `__USER_HOME__`)
-- `scripts/install.py`, `scripts/verify.py`, `scripts/memory.py`, `scripts/knowledge.py`: cross-platform installer (`--dry-run`, `--skip-rules`, `--skip-memory`), secret-scanning verifier, and memory/knowledge sync tools
+- `scripts/install.py`, `scripts/verify.py`, `scripts/clean.py`, `scripts/memory.py`, `scripts/knowledge.py`: cross-platform installer (`--dry-run`, `--skip-rules`, `--skip-memory`), zero-leftover artifact & secret-scanning verifier, runtime scratch cleaner (`--runtime`), and memory/knowledge sync tools

@@ -6,10 +6,25 @@
     "chrome-devtools-plugin": {
       "enabled": true
     },
+    "gcalendar": {
+      "enabled": true
+    },
+    "gdocs": {
+      "enabled": true
+    },
+    "gdrive": {
+      "enabled": true
+    },
     "gemini-api": {
       "enabled": true
     },
     "google-antigravity-sdk": {
+      "enabled": true
+    },
+    "gsheets": {
+      "enabled": true
+    },
+    "gslides": {
       "enabled": true
     },
     "modern-web-guidance-plugin": {

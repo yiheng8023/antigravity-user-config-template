@@ -13,6 +13,7 @@
 | 仅应用满血设置、MCP 与安全护栏（不覆盖自己的 `AGENTS.md`） | `python -B scripts/install.py --skip-rules` |
 | 在不改动本机的情况下预览安装 | `python -B scripts/install.py --dry-run` |
 | 校验模板完整性与安全边界 | `python -B scripts/verify.py` |
+| 清理临时过程产物与运行时缓存 | `python -B scripts/clean.py --runtime` |
 | 了解模板与私有仓库边界 | [仓库定位](#仓库定位) |
 
 ## 独立模板定位

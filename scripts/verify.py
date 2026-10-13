@@ -34,6 +34,7 @@ EXPECTED_BASE = [
     "scripts/verify.py",
     "scripts/memory.py",
     "scripts/knowledge.py",
+    "scripts/clean.py",
 ]
 
 EXPECTED_TEMPLATE = [
@@ -172,13 +173,34 @@ def main() -> None:
         if not (REPO / "memory" / "MEMORY.md").exists():
             errs.append("missing: memory/MEMORY.md")
         else:
-            # Cross-check that every memory/*.md is registered in memory/MEMORY.md
+            # Cross-check that every memory/*.md is registered in MEMORY.md
             memory_md_text = (REPO / "memory" / "MEMORY.md").read_text(encoding="utf-8")
             for f in (REPO / "memory").glob("*.md"):
                 if f.name in ("MEMORY.md", "README.md"):
                     continue
                 if f.name not in memory_md_text:
                     errs.append(f"memory file {f.name} is not indexed in memory/MEMORY.md")
+            # Cross-check that every link in MEMORY.md resolves to an existing file
+            for linked in re.findall(r"\]\(([A-Za-z0-9._\-]+\.md)\)", memory_md_text):
+                if not (REPO / "memory" / linked).exists():
+                    errs.append(f"memory/MEMORY.md references non-existent stale file: {linked}")
+            # Cross-check that every memory link in AGENTS.md resolves to an existing file
+            agents_text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+            for linked in re.findall(r"\.gemini/config/memory/([A-Za-z0-9._\-]+\.md)", agents_text):
+                if not (REPO / "memory" / linked).exists():
+                    errs.append(f"AGENTS.md Global Memory Index references non-existent stale file: {linked}")
+
+    # Zero-leftover temporary artifact check across the repository
+    temp_suffixes = {".tmp", ".temp", ".bak", ".swp", ".swo", ".pyc", ".pyo"}
+    for path in REPO.rglob("*"):
+        if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir():
+            continue
+        if (
+            path.name in (".DS_Store", "Thumbs.db")
+            or path.suffix.lower() in temp_suffixes
+            or ".bak-" in path.name
+        ):
+            errs.append(f"leftover temporary artifact found: {path.relative_to(REPO).as_posix()} (run scripts/clean.py)")
 
     # JSON syntax validation
     for jrel in JSON_FILES:

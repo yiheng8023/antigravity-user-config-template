@@ -149,8 +149,8 @@ def main() -> None:
         n = copy_tree_contents(LIVE_DESKTOP_KNOWLEDGE, REPO_KNOWLEDGE, ignore_readme=False, prune_stale=True)
         print(f"{tag}Backed up {n} updated file(s) from {LIVE_DESKTOP_KNOWLEDGE} -> {REPO_KNOWLEDGE}")
     else:
-        n_desk = copy_tree_contents(REPO_KNOWLEDGE, LIVE_DESKTOP_KNOWLEDGE, ignore_readme=True)
-        n_cli = copy_tree_contents(REPO_KNOWLEDGE, LIVE_CLI_KNOWLEDGE, ignore_readme=True)
+        n_desk = copy_tree_contents(REPO_KNOWLEDGE, LIVE_DESKTOP_KNOWLEDGE, ignore_readme=True, prune_stale=True)
+        n_cli = copy_tree_contents(REPO_KNOWLEDGE, LIVE_CLI_KNOWLEDGE, ignore_readme=True, prune_stale=True)
         print(f"{tag}Restored {n_desk} updated file(s) -> {LIVE_DESKTOP_KNOWLEDGE} and {n_cli} updated file(s) -> {LIVE_CLI_KNOWLEDGE}")
 
 
