@@ -47,10 +47,12 @@
     "globalPermissionGrants": {},
     "internetAccessPolicy": "AGENT_SETTING_POLICY_ALLOW",
     "nonWorkspaceFileAccessPolicy": "AGENT_SETTING_POLICY_ALLOW",
+    "permissionGrantsV2Migrated": true,
     "permissionPreset": "AGENT_PERMISSION_PRESET_TURBO",
     "queuedMessageDeliveryStrategy": "MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE",
     "remoteControlEnabled": true,
     "remoteControlHostname": "__HOSTNAME__",
+    "sandboxEnabledAtV2Migration": false,
     "useAiCredits": false
   }
 }
