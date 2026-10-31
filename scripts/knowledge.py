@@ -6,6 +6,7 @@ Usage:
   python -B scripts/knowledge.py --backup
   python -B scripts/knowledge.py --restore
   python -B scripts/knowledge.py --backup --dry-run
+  python -B scripts/knowledge.py --restore --prune  # 显式删除目标中源快照未包含的条目
 """
 from __future__ import annotations
 
@@ -14,18 +15,21 @@ import shutil
 import sys
 from pathlib import Path
 
+from safety import is_template_repo, require_contained, scan_files
+
 REPO = Path(__file__).resolve().parent.parent
 REPO_KNOWLEDGE = REPO / "knowledge"
 LIVE_DESKTOP_KNOWLEDGE = Path.home() / ".gemini" / "antigravity" / "knowledge"
 LIVE_CLI_KNOWLEDGE = Path.home() / ".gemini" / "antigravity-cli" / "knowledge"
 DRY = "--dry-run" in sys.argv[1:]
+PRUNE = "--prune" in sys.argv[1:]
 
 SKIP_FILENAMES = {"README.md", "knowledge.lock"}
-SKIP_SUFFIXES = {".lock", ".tmp"}
+SKIP_SUFFIXES = {".lock", ".tmp", ".temp", ".bak"}
 
 
 def _is_template_repo() -> bool:
-    return REPO.name.endswith("-template") or (REPO / "docs" / "public-private-boundary.md").exists()
+    return is_template_repo(REPO)
 
 
 def _tree_files(src: Path) -> dict[str, Path]:
@@ -33,6 +37,7 @@ def _tree_files(src: Path) -> dict[str, Path]:
     if not src.exists():
         return res
     for item in sorted(src.rglob("*")):
+        require_contained(item, src)
         if not item.is_file():
             continue
         if item.name in SKIP_FILENAMES or item.suffix in SKIP_SUFFIXES or item.name in (".DS_Store", "Thumbs.db"):
@@ -86,17 +91,15 @@ def status() -> None:
 def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False, prune_stale: bool = False) -> int:
     if not src.exists():
         return 0
+    source = _tree_files(src)
+    if not source:
+        print("  Empty knowledge source; target preserved (including with --prune).")
+        return 0
+    targets = _tree_files(dst)
+    for rel in source:
+        require_contained(dst / rel, dst)
     count = 0
-    src_files: set[str] = set()
-    for item in sorted(src.rglob("*")):
-        if not item.is_file():
-            continue
-        if item.name in (".DS_Store", "Thumbs.db") or item.suffix in SKIP_SUFFIXES or item.name.endswith(".lock"):
-            continue
-        rel = item.relative_to(src)
-        if ignore_readme and rel.as_posix() == "README.md":
-            continue
-        src_files.add(rel.as_posix())
+    for rel, item in source.items():
         target = dst / rel
         if target.exists() and filecmp.cmp(item, target, shallow=False):
             continue
@@ -106,18 +109,14 @@ def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False, prune_
         count += 1
 
     if prune_stale and dst.exists():
-        for item in sorted(dst.rglob("*")):
-            if not item.is_file():
-                continue
-            rel = item.relative_to(dst).as_posix()
-            if rel == "README.md":
-                continue
-            if rel not in src_files:
+        for rel, item in targets.items():
+            if rel not in source:
                 if not DRY:
                     item.unlink()
                 print(f"  {'[dry-run] ' if DRY else ''}pruned stale in target: {rel}")
         if not DRY:
             for d in sorted(dst.rglob("*"), reverse=True):
+                require_contained(d, dst)
                 if d.is_dir() and not any(d.iterdir()):
                     d.rmdir()
 
@@ -125,7 +124,7 @@ def copy_tree_contents(src: Path, dst: Path, ignore_readme: bool = False, prune_
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:] if a != "--dry-run"]
+    args = [a for a in sys.argv[1:] if a not in ("--dry-run", "--prune")]
     if len(args) != 1 or args[0] not in ("--backup", "--restore", "--status"):
         print(__doc__.strip())
         sys.exit(1)
@@ -142,17 +141,26 @@ def main() -> None:
         # Check drift between Desktop and CLI before backup
         desk_files = _tree_files(LIVE_DESKTOP_KNOWLEDGE)
         cli_files = _tree_files(LIVE_CLI_KNOWLEDGE)
+        hits = scan_files(desk_files)
+        if hits:
+            print("ABORT: potential credentials in knowledge items; no files changed.")
+            for hit in hits:
+                print(f"  ! {hit}")
+            sys.exit(1)
         diff_keys = [k for k in set(desk_files) & set(cli_files) if not filecmp.cmp(desk_files[k], cli_files[k], shallow=False)]
         if diff_keys:
             print(f"WARNING: Knowledge drift detected between Desktop and CLI for {len(diff_keys)} item(s): {', '.join(diff_keys)}")
             print("Backing up from Desktop as primary baseline; consider running --restore afterward to resynchronize.")
-        n = copy_tree_contents(LIVE_DESKTOP_KNOWLEDGE, REPO_KNOWLEDGE, ignore_readme=False, prune_stale=True)
+        n = copy_tree_contents(LIVE_DESKTOP_KNOWLEDGE, REPO_KNOWLEDGE, ignore_readme=True, prune_stale=PRUNE)
         print(f"{tag}Backed up {n} updated file(s) from {LIVE_DESKTOP_KNOWLEDGE} -> {REPO_KNOWLEDGE}")
     else:
-        n_desk = copy_tree_contents(REPO_KNOWLEDGE, LIVE_DESKTOP_KNOWLEDGE, ignore_readme=True, prune_stale=True)
-        n_cli = copy_tree_contents(REPO_KNOWLEDGE, LIVE_CLI_KNOWLEDGE, ignore_readme=True, prune_stale=True)
+        n_desk = copy_tree_contents(REPO_KNOWLEDGE, LIVE_DESKTOP_KNOWLEDGE, ignore_readme=True, prune_stale=PRUNE)
+        n_cli = copy_tree_contents(REPO_KNOWLEDGE, LIVE_CLI_KNOWLEDGE, ignore_readme=True, prune_stale=PRUNE)
         print(f"{tag}Restored {n_desk} updated file(s) -> {LIVE_DESKTOP_KNOWLEDGE} and {n_cli} updated file(s) -> {LIVE_CLI_KNOWLEDGE}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError) as exc:
+        sys.exit(f"Sync stopped: {exc}")

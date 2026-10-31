@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Restore Antigravity user configuration from this repository into ~/.gemini/.
-Cross-platform (Windows / macOS / Linux).
-
-Usage:
-  python -B scripts/install.py                # restore full config + rules + global memory into ~/.gemini/
-  python -B scripts/install.py --skip-rules   # restore settings/hooks/MCP without touching AGENTS.md or personal memory
-  python -B scripts/install.py --skip-memory  # restore rules/settings/hooks/MCP without restoring memory/ & knowledge/
-  python -B scripts/install.py --dry-run      # preview changes without writing
-"""
+"""安装或恢复 Antigravity 配置；默认保留已有设置、插件选择和信任范围。"""
 from __future__ import annotations
 
+import argparse
+import copy
 import filecmp
 import json
 import os
@@ -17,263 +11,221 @@ import platform
 import re
 import shutil
 import socket
-import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from safety import require_contained
+
 REPO = Path(__file__).resolve().parent.parent
-HOME = Path.home()
-GEMINI_DIR = HOME / ".gemini"
-CONFIG_DIR = GEMINI_DIR / "config"
-ANTIGRAVITY_DIR = GEMINI_DIR / "antigravity"
-CLI_DIR = GEMINI_DIR / "antigravity-cli"
-TS = datetime.now().strftime("%Y%m%d-%H%M%S")
-DRY = "--dry-run" in sys.argv[1:]
-SKIP_RULES = "--skip-rules" in sys.argv[1:]
-SKIP_MEMORY = "--skip-memory" in sys.argv[1:] or SKIP_RULES
 
 
-def default_projects_dir() -> str:
-    if platform.system() == "Windows":
-        drive = Path("C:/Projects")
-        if drive.exists():
-            return str(drive)
-    return str(HOME / "Projects")
+def read_object(path: Path) -> tuple[dict, bytes | None]:
+    if not path.exists():
+        return {}, None
+    raw = path.read_bytes()
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeError):
+        raise ValueError(f"Invalid JSON: {path.name}; original file preserved") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object: {path.name}; original file preserved")
+    return data, raw
+
+
+def validate_sections(data: dict, name: str, sections: dict[str, type]) -> None:
+    for key, kind in sections.items():
+        if key in data and not isinstance(data[key], kind):
+            raise ValueError(f"Invalid {name}.{key}: expected {kind.__name__}")
+    if "trustedWorkspaces" in data and any(not isinstance(w, str) for w in data["trustedWorkspaces"]):
+        raise ValueError(f"Invalid {name}.trustedWorkspaces: expected strings")
+    for key in ("plugins", "mcpServers"):
+        if key in data and any(not isinstance(v, dict) for v in data[key].values()):
+            raise ValueError(f"Invalid {name}.{key}: expected object entries")
+
+
+def validate_hooks(data: dict) -> None:
+    for name, config in data.items():
+        if not isinstance(config, dict):
+            raise ValueError(f"Invalid hook definition: {name}")
+        if "enabled" in config and not isinstance(config["enabled"], bool):
+            raise ValueError(f"Invalid hook enabled flag: {name}")
+        for event in ("PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop", "SessionStart"):
+            if event not in config:
+                continue
+            groups = config[event]
+            if not isinstance(groups, list) or any(not isinstance(group, dict) for group in groups):
+                raise ValueError(f"Invalid hook event: {name}.{event}")
+            for group in groups:
+                if "hooks" in group and (not isinstance(group["hooks"], list) or any(not isinstance(handler, dict) for handler in group["hooks"])):
+                    raise ValueError(f"Invalid hook handlers: {name}.{event}")
 
 
 def backup(target: Path) -> None:
-    if not target.exists():
-        return
-    bak = target.with_name(target.name + f".bak-{TS}")
-    if DRY:
-        print(f"  [dry-run] would back up {target.name} -> {bak.name}")
-        return
-    if target.is_dir():
-        shutil.copytree(target, bak)
-    else:
-        shutil.copy2(target, bak)
-    print(f"  backed up existing -> {bak.name}")
+    if target.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        shutil.copy2(target, target.with_name(f"{target.name}.bak-{stamp}"))
+        print(f"  backed up: {target.name}")
 
 
-def copy_file(src: Path, dst: Path) -> None:
+def check_unchanged(target: Path, original: bytes | None) -> None:
+    current = target.read_bytes() if target.exists() else None
+    if current != original:
+        raise ValueError(f"Concurrent change: {target.name}; rerun after the other writer finishes")
+
+
+def write_json(target: Path, data: dict, original: bytes | None, dry: bool) -> None:
+    if original is not None and json.loads(original.decode("utf-8-sig")) == data:
+        print(f"  unchanged: {target.name}")
+        return
+    check_unchanged(target, original)
+    if dry:
+        print(f"  [dry-run] would update: {target}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup(target)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as stream:
+            temp_path = Path(stream.name)
+            json.dump(data, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+        check_unchanged(target, original)
+        os.replace(temp_path, target)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    print(f"  updated: {target.name}")
+
+
+def copy_file(src: Path, dst: Path, dry: bool, preserve: bool = False) -> None:
     if dst.exists() and filecmp.cmp(src, dst, shallow=False):
-        print(f"  {src.relative_to(REPO)} -> {dst}  (already up to date)")
         return
-    if not DRY:
-        dst.parent.mkdir(parents=True, exist_ok=True)
+    if preserve and dst.exists():
+        print(f"  kept existing content: {dst}")
+        return
+    if dry:
+        print(f"  [dry-run] would copy: {src.relative_to(REPO)} -> {dst}")
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
     backup(dst)
-    if DRY:
-        print(f"  [dry-run] {src.relative_to(REPO)} -> {dst}")
-        return
     shutil.copy2(src, dst)
-    print(f"  {src.relative_to(REPO)} -> {dst}")
 
 
-def copy_dir(src: Path, dst: Path, ignore_readme: bool = False, backup_existing: bool = True) -> int:
-    if not src.exists():
-        return 0
-    count = 0
+def copy_dir(src: Path, dst: Path, dry: bool, preserve: bool = False) -> None:
     for item in sorted(src.rglob("*")):
         if not item.is_file():
             continue
-        if item.name in (".DS_Store", "Thumbs.db") or item.name.endswith(".lock") or ".bak" in item.name:
-            continue
         rel = item.relative_to(src)
-        if ignore_readme and rel.as_posix() == "README.md":
+        if rel.as_posix() == "README.md" or item.name.endswith(".lock") or ".bak" in item.name:
             continue
-        target = dst / rel
-        if target.exists() and filecmp.cmp(item, target, shallow=False):
-            continue
-        if not DRY:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        if backup_existing:
-            backup(target)
-        if not DRY:
-            shutil.copy2(item, target)
-        count += 1
-    if count > 0:
-        prefix = "[dry-run] " if DRY else ""
-        print(f"  {prefix}{src.relative_to(REPO)}/ -> {dst}/  ({count} updated files)")
-    return count
+        require_contained(item, src)
+        require_contained(dst / rel, dst)
+        copy_file(item, dst / rel, dry, preserve=preserve)
 
 
-def _strip_meta(d: dict) -> dict:
-    return {k: v for k, v in d.items() if not str(k).startswith("_")}
+def merge_config(template: dict, existing: dict, hostname: str) -> dict:
+    result = copy.deepcopy(existing)
+    for section in ("plugins", "userSettings"):
+        target = result.setdefault(section, {})
+        for key, value in template.get(section, {}).items():
+            target.setdefault(key, copy.deepcopy(value))
+    if result["userSettings"].get("remoteControlHostname") == "__HOSTNAME__":
+        result["userSettings"]["remoteControlHostname"] = hostname
+    return result
 
 
-def _collect_env_refs(obj, found: set) -> None:
-    if isinstance(obj, str):
-        found.update(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", obj))
-    elif isinstance(obj, list):
-        for x in obj:
-            _collect_env_refs(x, found)
-    elif isinstance(obj, dict):
-        for x in obj.values():
-            _collect_env_refs(x, found)
+def merge_mcp(template: dict, existing: dict) -> dict:
+    result = copy.deepcopy(existing)
+    servers = result.setdefault("mcpServers", {})
+    for name, config in template.get("mcpServers", {}).items():
+        servers.setdefault(name, {k: v for k, v in config.items() if not k.startswith("_")})
+    return result
 
 
-def merge_mcp_servers(manifest_path: Path, target_path: Path):
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    servers = manifest.get("mcpServers", {})
-    data = {}
-    if target_path.exists():
-        try:
-            raw = target_path.read_text(encoding="utf-8").strip()
-            if raw:
-                data = json.loads(raw)
-        except Exception:
-            data = {}
-    existing = data.get("mcpServers")
-    if not isinstance(existing, dict):
-        existing = {}
-    added, kept, env_needed = [], [], set()
-    for name, cfg in servers.items():
-        if not isinstance(cfg, dict):
-            continue
-        if name in existing:
-            kept.append(name)
-            continue
-        clean = _strip_meta(cfg)
-        existing[name] = clean
-        added.append(name)
-        _collect_env_refs(clean, env_needed)
-    data["mcpServers"] = existing
-    return data, sorted(added), sorted(kept), sorted(env_needed)
+def merge_hooks(template: dict, existing: dict, hook_path: Path) -> dict:
+    result = copy.deepcopy(existing)
+    for name, config in template.items():
+        result.setdefault(name, copy.deepcopy(config))
+    # 仅迁移本项目旧版的相对路径；其他钩子、禁用状态和自定义命令均保留。
+    guard = result.get("git-guard")
+    if isinstance(guard, dict):
+        for group in guard.get("PreToolUse", []):
+            if isinstance(group, dict):
+                for handler in group.get("hooks", []):
+                    if isinstance(handler, dict) and handler.get("command") == "node ./hooks/git-guard.js":
+                        handler["command"] = f'node "{hook_path.as_posix()}"'
+    return result
+
+
+def merge_cli(template: dict, existing: dict, home: Path) -> dict:
+    projects = Path("C:/Projects") if platform.system() == "Windows" and Path("C:/Projects").exists() else home / "Projects"
+    result = copy.deepcopy(template)
+    result["trustedWorkspaces"] = [w.replace("__PROJECTS_DIR__", str(projects)).replace("__USER_HOME__", str(home)) for w in template.get("trustedWorkspaces", [])]
+    result.update(copy.deepcopy(existing))
+    return result
 
 
 def main() -> None:
-    hostname = os.environ.get("ANTIGRAVITY_HOSTNAME") or socket.gethostname() or "local-host"
-    user_home = str(HOME)
-    projects_dir = default_projects_dir()
-
-    print(f"Installing Antigravity user config into: {GEMINI_DIR}" + ("   [DRY RUN -- no writes]" if DRY else ""))
-    if not DRY:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CLI_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 1. Global rules (AGENTS.md) and lifecycle hooks (hooks.json + hooks/)
-    if SKIP_RULES:
-        print("  [skip-rules] leaving existing AGENTS.md / GEMINI.md untouched")
-    else:
-        copy_file(REPO / "AGENTS.md", CONFIG_DIR / "AGENTS.md")
-    copy_file(REPO / "hooks.json", CONFIG_DIR / "hooks.json")
-    copy_dir(REPO / "hooks", CONFIG_DIR / "hooks")
-
-    # 2. Global memory (memory/ -> ~/.gemini/config/memory/) & Knowledge Items (knowledge/ -> Desktop & CLI)
-    if SKIP_MEMORY:
-        print("  [skip-memory] leaving global memory and knowledge items untouched")
-    else:
-        copy_dir(REPO / "memory", CONFIG_DIR / "memory", ignore_readme=True, backup_existing=False)
-        copy_dir(REPO / "knowledge", ANTIGRAVITY_DIR / "knowledge", ignore_readme=True, backup_existing=False)
-        copy_dir(REPO / "knowledge", CLI_DIR / "knowledge", ignore_readme=True, backup_existing=False)
-
-    # 3. Additive merge config/config.example.json -> ~/.gemini/config/config.json
-    cfg_template = json.loads((REPO / "config" / "config.example.json").read_text(encoding="utf-8"))
-    cfg_target = CONFIG_DIR / "config.json"
-    existing_cfg = {}
-    if cfg_target.exists():
-        try:
-            existing_cfg = json.loads(cfg_target.read_text(encoding="utf-8"))
-        except Exception:
-            existing_cfg = {}
-
-    custom_host = existing_cfg.get("userSettings", {}).get("remoteControlHostname")
-    effective_host = custom_host if (custom_host and custom_host != "__HOSTNAME__") else hostname
-
-    merged_settings = dict(cfg_template.get("userSettings", {}))
-    if isinstance(existing_cfg.get("userSettings"), dict):
-        merged_settings.update(existing_cfg["userSettings"])
-        for k, v in cfg_template.get("userSettings", {}).items():
-            if k not in merged_settings or k.endswith("Policy") or k.startswith("allow") or k.startswith("artifact") or k.startswith("permission"):
-                merged_settings[k] = v
-    merged_settings["remoteControlHostname"] = effective_host
-
-    merged_plugins = dict(existing_cfg.get("plugins", {})) if isinstance(existing_cfg.get("plugins"), dict) else {}
-    for p_name, p_val in cfg_template.get("plugins", {}).items():
-        if p_name in merged_plugins and isinstance(merged_plugins[p_name], dict):
-            merged_plugins[p_name]["enabled"] = True
-        else:
-            merged_plugins[p_name] = dict(p_val)
-
-    final_cfg = dict(existing_cfg) if isinstance(existing_cfg, dict) else {}
-    final_cfg["plugins"] = merged_plugins
-    final_cfg["userSettings"] = merged_settings
-
-    if cfg_target.exists() and existing_cfg == final_cfg:
-        print(f"  config/config.example.json -> {cfg_target}  (already up to date, hostname={effective_host})")
-    else:
-        backup(cfg_target)
-        if DRY:
-            print(f"  [dry-run] config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
-        else:
-            cfg_target.write_text(json.dumps(final_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print(f"  config/config.example.json -> {cfg_target}  (rendered hostname={effective_host})")
-
-    # 4. Additive merge of MCP servers -> ~/.gemini/config/mcp_config.json
-    mcp_manifest = REPO / "config" / "mcp_config.example.json"
-    mcp_target = CONFIG_DIR / "mcp_config.json"
-    merged_mcp, added, kept, env_needed = merge_mcp_servers(mcp_manifest, mcp_target)
-    existing_mcp = {}
-    if mcp_target.exists():
-        try:
-            existing_mcp = json.loads(mcp_target.read_text(encoding="utf-8"))
-        except Exception:
-            existing_mcp = {}
-
-    if mcp_target.exists() and not added and existing_mcp == merged_mcp:
-        print(f"  MCP servers in {mcp_target}  (all up to date)")
-    else:
-        backup(mcp_target)
-        if DRY:
-            print(f"  [dry-run] would merge MCP servers into {mcp_target}")
-        else:
-            mcp_target.write_text(json.dumps(merged_mcp, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print(f"  MCP servers merged into {mcp_target}")
-    print(f"    added:  {', '.join(added) if added else '(none -- all already present)'}")
-    print(f"    kept:   {', '.join(kept) if kept else '(none)'}")
-    if env_needed:
-        print(f"    set these env vars locally for added servers: {', '.join(env_needed)}")
-
-    # 5. Render config/cli-settings.example.json -> ~/.gemini/antigravity-cli/settings.json
-    cli_template = json.loads((REPO / "config" / "cli-settings.example.json").read_text(encoding="utf-8"))
-    cli_target = CLI_DIR / "settings.json"
-    existing_cli = {}
-    if cli_target.exists():
-        try:
-            existing_cli = json.loads(cli_target.read_text(encoding="utf-8"))
-        except Exception:
-            existing_cli = {}
-
-    workspaces = cli_template.get("trustedWorkspaces", [])
-    rendered_ws = []
-    for w in workspaces:
-        val = str(w).replace("__PROJECTS_DIR__", projects_dir).replace("__USER_HOME__", user_home)
-        if val not in rendered_ws:
-            rendered_ws.append(val)
-    if isinstance(existing_cli.get("trustedWorkspaces"), list):
-        for ew in existing_cli["trustedWorkspaces"]:
-            if ew not in rendered_ws:
-                rendered_ws.append(ew)
-
-    final_cli = dict(cli_template)
-    final_cli.update(existing_cli)
-    for k, v in cli_template.items():
-        if k not in final_cli:
-            final_cli[k] = v
-    final_cli["trustedWorkspaces"] = rendered_ws
-
-    if cli_target.exists() and existing_cli == final_cli:
-        print(f"  config/cli-settings.example.json -> {cli_target}  (already up to date)")
-    else:
-        backup(cli_target)
-        if DRY:
-            print(f"  [dry-run] config/cli-settings.example.json -> {cli_target}  (rendered)")
-        else:
-            cli_target.write_text(json.dumps(final_cli, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print(f"  config/cli-settings.example.json -> {cli_target}  (rendered)")
-
-    print("\nDone." + (" (dry run -- nothing was written)" if DRY else ""))
-    print("Restart Antigravity / agy CLI to ensure all settings and hooks take effect.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-rules", action="store_true", help="保留规则、记忆和知识库")
+    parser.add_argument("--skip-memory", action="store_true", help="保留记忆和知识库")
+    parser.add_argument("--replace-rules", action="store_true", help="备份后替换已有 AGENTS.md")
+    args = parser.parse_args()
+    if args.skip_rules and args.replace_rules:
+        parser.error("--skip-rules and --replace-rules cannot be combined")
+    home = Path.home()
+    config_dir = home / ".gemini/config"
+    cli_dir = home / ".gemini/antigravity-cli"
+    specifications = [
+        ("config/config.example.json", config_dir / "config.json", {"plugins": dict, "userSettings": dict}),
+        ("config/mcp_config.example.json", config_dir / "mcp_config.json", {"mcpServers": dict}),
+        ("hooks.json", config_dir / "hooks.json", {}),
+        ("config/cli-settings.example.json", cli_dir / "settings.json", {"trustedWorkspaces": list}),
+    ]
+    try:
+        prepared = []
+        for source, target, sections in specifications:
+            template, _ = read_object(REPO / source)
+            if not (REPO / source).is_file():
+                raise ValueError(f"Missing template: {source}")
+            existing, original = read_object(target)
+            validate_sections(template, source, sections)
+            validate_sections(existing, target.name, sections)
+            if source == "hooks.json":
+                validate_hooks(template)
+                validate_hooks(existing)
+            prepared.append((template, existing, target, original))
+        hostname = os.environ.get("ANTIGRAVITY_HOSTNAME") or socket.gethostname()
+        results = [
+            merge_config(prepared[0][0], prepared[0][1], hostname),
+            merge_mcp(prepared[1][0], prepared[1][1]),
+            merge_hooks(prepared[2][0], prepared[2][1], config_dir / "hooks/git-guard.js"),
+            merge_cli(prepared[3][0], prepared[3][1], home),
+        ]
+        for _, _, target, original in prepared:
+            check_unchanged(target, original)
+        if shutil.which("node") is None:
+            raise ValueError("Node.js is required for the Git hook; no configuration was changed")
+        print(f"Installing into: {home / '.gemini'}" + (" [DRY RUN]" if args.dry_run else ""))
+        # 所有 JSON 预检通过后才复制或写入，避免损坏配置引发半途覆盖。
+        if not args.skip_rules:
+            copy_file(REPO / "AGENTS.md", config_dir / "AGENTS.md", args.dry_run, preserve=not args.replace_rules)
+        copy_dir(REPO / "hooks", config_dir / "hooks", args.dry_run)
+        if not (args.skip_rules or args.skip_memory):
+            copy_dir(REPO / "memory", config_dir / "memory", args.dry_run, preserve=True)
+            for app in ("antigravity", "antigravity-cli"):
+                copy_dir(REPO / "knowledge", home / ".gemini" / app / "knowledge", args.dry_run, preserve=True)
+        for result, (_, _, target, original) in zip(results, prepared):
+            write_json(target, result, original, args.dry_run)
+        added = set(results[1]["mcpServers"]) - set(prepared[1][1].get("mcpServers", {}))
+        refs = sorted(set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", json.dumps({k: results[1]["mcpServers"][k] for k in added}))))
+        if refs:
+            print("Set these environment variables locally: " + ", ".join(refs))
+        print("Done. Restart Antigravity / agy to load updated hooks.")
+    except (ValueError, OSError) as exc:
+        parser.exit(1, f"Installation stopped: {exc}\n")
 
 
 if __name__ == "__main__":

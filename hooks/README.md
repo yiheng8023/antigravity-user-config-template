@@ -1,20 +1,28 @@
-# Hooks
+# Git command guard
 
-Hooks can automate local Google Antigravity workflows, but they can also mutate files,
-run commands, or push data.
+`hooks.json` registers `git-guard.js` for Antigravity `PreToolUse` / `run_command`.
+The installer renders the bundled handler to an absolute local path, so it works
+from unrelated project directories. It preserves other hooks, custom handlers,
+and the guard's existing disabled state.
 
-Keep this public template hook-free by default. Add hook examples only when
-they are safe, dry-run friendly, and clearly documented.
+The handler reads the proposed command from JSON on stdin and returns JSON on
+stdout, following the [official hook contract](https://antigravity.google/docs/hooks).
+`allow` delegates to the next hook/default permission policy; `force_ask` requires
+review even when cached permissions or Turbo would otherwise approve it.
 
-Do not commit hooks that silently upload memory, push repositories, install
-software, or read secrets unless they are explicitly public-safe examples.
+Known destructive operations include forced pushes/refspecs and mirror pushes,
+remote deletion, hard reset, forced clean, forced branch deletion, worktree restore,
+checkout/switch discard, stash deletion, reflog deletion, ref deletion, history
+filtering, and immediate garbage pruning. Global Git options (`-C`, `-c`,
+`--git-dir`) and `git.exe` paths are recognized. Safe `branch -d`, clean dry runs,
+and `restore --staged` remain allowed. Each command in a compound restore is
+checked independently. `push --force-with-lease` remains delegated to default policy.
 
-## PreToolUse Guardrail Example: `git-guard.js`
+Malformed or missing input requires review. Reasons contain an operation category,
+never the full proposed command, which may contain private arguments.
 
-Configured in `hooks.json` under `PreToolUse` for `run_command`. In `TURBO` mode, non-destructive commands pass through automatically (`decision: allow`), while destructive Git commands trigger mandatory manual confirmation (`decision: force_ask`):
-
-- **Remote history rewrites**: `git push --force` (excluding `--force-with-lease`), `git push -f`, and `git push +<ref>` refspec force pushes.
-- **Remote deletion**: `git push --delete`, `git push origin :<branch>`.
-- **Worktree discard**: `git reset --hard`, `git checkout -- <file>`, `git checkout .`, `git checkout -f`, `git switch -f/--discard-changes`, and `git restore` (when modifying worktree). Safe unstaging `git restore --staged` / `-S` is allowed.
-- **Untracked deletion & force branch deletion**: `git clean -f/--force`, `git branch -D/--delete --force`.
-- **Destructive stash & history manipulation**: `git stash drop`, `git stash clear`, `git reflog delete`, `git update-ref -d`, `git filter-branch`, and `git gc --prune=now`.
+This is a best-effort command guard, not a shell sandbox. Aliases, arbitrary scripts,
+encoded commands, executable indirection, and every shell grammar cannot be covered.
+Keep ordinary permission rules and original backups. Restart Antigravity/agy after
+installation; direct protocol tests do not establish that an existing session has
+reloaded hooks.

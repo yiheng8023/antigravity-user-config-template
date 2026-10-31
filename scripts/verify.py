@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from safety import SECRET_PATTERNS, is_template_repo as template_repository
+
+from install import read_object, validate_sections, validate_hooks
 
 REPO = Path(__file__).resolve().parent.parent
 
 
 def is_template_repo() -> bool:
-    return REPO.name.endswith("-template") or (REPO / "docs" / "public-private-boundary.md").exists()
+    return template_repository(REPO)
 
 
 EXPECTED_BASE = [
@@ -31,6 +36,8 @@ EXPECTED_BASE = [
     "README.md",
     "README.zh-CN.md",
     "scripts/install.py",
+    "scripts/safety.py",
+    "tests/test_regressions.py",
     "scripts/verify.py",
     "scripts/memory.py",
     "scripts/knowledge.py",
@@ -76,25 +83,19 @@ JSON_FILES = [
     "config/cli-settings.example.json",
 ]
 
-SECRET_PATTERNS = [
-    (re.compile(r"AIza[0-9A-Za-z\-_]{35}"), "Google API key"),
-    (re.compile(r"ya29\.[0-9A-Za-z\-_]+"), "Google OAuth access token"),
-    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"), "Anthropic key"),
-    (re.compile(r"sk-[A-Za-z0-9]{20,}"), "OpenAI-style key"),
-    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "GitHub PAT"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "GitHub fine-grained PAT"),
-    (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "JWT"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key block"),
-    (
-        re.compile(r'"(?:password|secret|token|api[_-]?key)"\s*:\s*"(?!<SET_LOCALLY>|__|\$\{|<)[^"]{6,}"', re.I),
-        "credential-looking JSON value",
-    ),
-]
+JSON_SECTIONS = {
+    "config/config.example.json": {"plugins": dict, "userSettings": dict},
+    "config/mcp_config.example.json": {"mcpServers": dict},
+    "config/cli-settings.example.json": {"trustedWorkspaces": list},
+}
+
 
 SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".ico", ".pdf", ".db", ".sqlite", ".pb"}
 
 
 def main() -> None:
+    if any(arg != "--live" for arg in sys.argv[1:]):
+        sys.exit("Usage: python -B scripts/verify.py [--live]")
     errs: list[str] = []
     template_mode = is_template_repo()
 
@@ -130,8 +131,8 @@ def main() -> None:
         # Ensure no personal memory files leaked into template
         mem_dir = REPO / "memory"
         if mem_dir.exists():
-            for f in mem_dir.glob("*.md"):
-                if f.name != "README.md":
+            for f in mem_dir.rglob("*"):
+                if f.is_file() and f != mem_dir / "README.md":
                     errs.append(f"Template repository must NOT contain personal memory file: {f.name}")
 
         # Ensure no personal knowledge items leaked into template
@@ -197,7 +198,7 @@ def main() -> None:
                     errs.append(f"AGENTS.md references non-existent stale memory file: {linked}")
 
     # Zero-leftover temporary artifact check across the repository
-    temp_suffixes = {".tmp", ".temp", ".bak", ".swp", ".swo", ".pyc", ".pyo", ".pyd", ".orig", ".rej"}
+    temp_suffixes = {".tmp", ".temp", ".bak", ".swp", ".swo", ".pyc", ".pyo", ".orig", ".rej"}
     for path in REPO.rglob("*"):
         if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir():
             continue
@@ -215,7 +216,11 @@ def main() -> None:
         jpath = REPO / jrel
         if jpath.exists():
             try:
-                json.loads(jpath.read_text(encoding="utf-8"))
+                data, _ = read_object(jpath)
+                if jrel == "hooks.json":
+                    validate_hooks(data)
+                else:
+                    validate_sections(data, jrel, JSON_SECTIONS[jrel])
             except Exception as exc:
                 errs.append(f"invalid JSON in {jrel}: {exc}")
 
@@ -236,7 +241,7 @@ def main() -> None:
             if res.returncode != 0:
                 errs.append(f"JavaScript syntax error in hooks/git-guard.js: {res.stderr.strip()}")
         except FileNotFoundError:
-            pass  # node not in PATH during CI step if node not installed; handled gracefully
+            errs.append("Node.js is required to validate hooks/git-guard.js")
 
     # Secret scanning
     for f in REPO.rglob("*"):
@@ -249,7 +254,10 @@ def main() -> None:
         for pat, label in SECRET_PATTERNS:
             m = pat.search(text)
             if m:
-                errs.append(f"possible secret [{label}] in {f.relative_to(REPO)}: {m.group(0)[:14]}...")
+                errs.append(f"possible secret [{label}] in {f.relative_to(REPO)}")
+
+    if "--live" in sys.argv[1:]:
+        errs.extend(verify_live())
 
     if errs:
         print("Validation FAILED:")
@@ -257,6 +265,64 @@ def main() -> None:
             print("  - " + e)
         sys.exit(1)
     print(f"Validation passed ({'template' if template_mode else 'private'} mode).")
+
+
+def verify_live() -> list[str]:
+    """仅读取必要状态；MCP 内容、会话与认证信息不会进入输出。"""
+    errs = []
+    root = Path.home() / ".gemini"
+    for rel, sections in [
+        ("config/config.json", {"plugins": dict, "userSettings": dict}),
+        ("config/mcp_config.json", {"mcpServers": dict}),
+        ("antigravity-cli/settings.json", {"trustedWorkspaces": list}),
+    ]:
+        target = root / rel
+        try:
+            if not target.exists():
+                raise ValueError(f"Missing live file: {rel}")
+            data, _ = read_object(target)
+            validate_sections(data, rel, sections)
+            print(f"Live JSON valid: {rel}")
+        except (ValueError, OSError) as exc:
+            errs.append(str(exc))
+    try:
+        hooks, _ = read_object(root / "config/hooks.json")
+        validate_hooks(hooks)
+        guard = hooks.get("git-guard", {})
+        if not guard:
+            raise ValueError("Live git-guard is missing")
+        if guard.get("enabled") is False:
+            print("Live git-guard: disabled by user; preserved")
+        else:
+            expected = f'node "{(root / "config/hooks/git-guard.js").as_posix()}"'
+            handlers = [h for group in guard.get("PreToolUse", []) for h in group.get("hooks", []) if group.get("matcher") == "run_command"]
+            if not any(h.get("command") == expected for h in handlers):
+                raise ValueError("Live git-guard does not use the installed absolute path")
+            for command, decision in [("git status --short", "allow"), ("git -C repo reset --hard", "force_ask")]:
+                result = subprocess.run(["node", str(root / "config/hooks/git-guard.js")], input=json.dumps({"toolCall": {"args": {"CommandLine": command}}}), capture_output=True, text=True, encoding="utf-8", timeout=10, cwd=Path.home())
+                if result.returncode or json.loads(result.stdout).get("decision") != decision:
+                    raise ValueError("Installed git-guard behavior check failed")
+            print("Live git-guard: ordinary command allowed; destructive command requires review")
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        errs.append(str(exc))
+    selected = shutil.which("agy")
+    preferred = root / "bin" / ("agy.exe" if sys.platform == "win32" else "agy")
+    try:
+        if selected is None:
+            raise ValueError("agy is not on PATH")
+        def version(path):
+            result = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=10)
+            match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\s*", result.stdout.strip())
+            if result.returncode or not match:
+                raise ValueError("Cannot determine agy version")
+            return tuple(map(int, match.groups()))
+        current = version(selected)
+        print("Live agy: " + ".".join(map(str, current)))
+        if preferred.exists() and version(preferred) > current:
+            errs.append("PATH selects an older agy than ~/.gemini/bin; correct PATH order")
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        errs.append(str(exc))
+    return errs
 
 
 if __name__ == "__main__":
