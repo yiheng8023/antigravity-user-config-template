@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -20,6 +21,7 @@ import knowledge
 import memory
 import safety
 import clean
+import verify
 
 
 class TemporaryHome(unittest.TestCase):
@@ -103,15 +105,138 @@ class TemporaryHome(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
                 (self.config / rel).unlink()
 
+    def test_invalid_cli_values_cause_zero_writes(self):
+        cases = [
+            {"toolPermission": False},
+            {"toolPermission": "automatic"},
+            {"agentMode": "default"},
+            {"artifactReviewPolicy": []},
+            {"allowNonWorkspaceAccess": "false"},
+            {"enableTerminalSandbox": 0},
+            {"verbosity": "max"},
+            {"trustedWorkspaces": [None]},
+        ]
+        for content in cases:
+            with self.subTest(content=content):
+                target = self.cli / "settings.json"
+                self.write(target, content)
+                before = self.snapshot()
+                result = self.run_install("--skip-rules")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.snapshot(), before)
+                target.unlink()
+
     def test_dry_run_and_unknown_arguments_have_zero_writes(self):
-        for flags, expected in [(('--dry-run',), 0), (('--typo',), 2)]:
+        for flags, expected in [(('--dry-run',), 0), (('--profile', 'turbo', '--dry-run'), 0), (('--profile', 'typo'), 2), (('--typo',), 2)]:
             result = self.run_install(*flags)
             self.assertEqual(result.returncode, expected, result.stderr)
             self.assertEqual(self.snapshot(), {})
 
+    def test_fresh_default_keeps_host_permissions_and_requires_explicit_trust(self):
+        result = self.run_install("--skip-rules")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((self.config / "config.json").read_text())
+        cli = json.loads((self.cli / "settings.json").read_text())
+        self.assertEqual(config["plugins"], {})
+        for key in ("permissionPreset", "remoteControlEnabled", "permissionGrantsV2Migrated", "sandboxEnabledAtV2Migration", "globalPermissionGrants"):
+            self.assertNotIn(key, config["userSettings"])
+        self.assertNotIn("toolPermission", cli)
+        self.assertNotIn("allowNonWorkspaceAccess", cli)
+        self.assertEqual(cli["trustedWorkspaces"], [])
+        self.assertEqual(cli["verbosity"], "medium")
+
+    def test_turbo_is_opt_in_without_automatic_plugins_or_trust(self):
+        result = self.run_install("--skip-rules", "--profile", "turbo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((self.config / "config.json").read_text())
+        cli = json.loads((self.cli / "settings.json").read_text())
+        self.assertEqual(config["userSettings"]["permissionPreset"], "AGENT_PERMISSION_PRESET_TURBO")
+        self.assertEqual(cli["toolPermission"], "always-proceed")
+        self.assertEqual(cli["agentMode"], "accept-edits")
+        self.assertTrue(cli["allowNonWorkspaceAccess"])
+        self.assertEqual(cli["trustedWorkspaces"], [])
+        self.assertEqual(config["plugins"], {})
+        self.assertNotIn("remoteControlEnabled", config["userSettings"])
+        self.assertNotIn("permissionGrantsV2Migrated", config["userSettings"])
+
+    def test_profiles_preserve_existing_cli_choices_and_future_fields(self):
+        original = {"agentMode": "plan", "toolPermission": "strict", "allowNonWorkspaceAccess": False, "verbosity": "high", "trustedWorkspaces": [], "futurePreference": {"enabled": True}}
+        for profile in ("default", "turbo"):
+            with self.subTest(profile=profile):
+                self.write(self.cli / "settings.json", original)
+                result = self.run_install("--skip-rules", "--profile", profile)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                actual = json.loads((self.cli / "settings.json").read_text())
+                for key, value in original.items():
+                    self.assertEqual(actual[key], value)
+
+    def test_profile_preserves_existing_desktop_permissions(self):
+        original = {"permissionPreset": "custom", "remoteControlEnabled": False, "enableTerminalSandbox": True}
+        self.write(self.config / "config.json", {"userSettings": original})
+        result = self.run_install("--skip-rules", "--profile", "turbo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actual = json.loads((self.config / "config.json").read_text())["userSettings"]
+        for key, value in original.items():
+            self.assertEqual(actual[key], value)
+
+    def test_configuration_notes_are_advisory_and_hide_private_paths(self):
+        config = {"userSettings": {"permissionPreset": "AGENT_PERMISSION_PRESET_TURBO", "remoteControlEnabled": True}}
+        cli = {"trustedWorkspaces": [str(self.home)], "allowNonWorkspaceAccess": True}
+        before = json.dumps([config, cli])
+        notes = verify.configuration_notes(config, cli, self.home)
+        self.assertTrue(any("Turbo" in note for note in notes))
+        self.assertTrue(any("user home" in note for note in notes))
+        self.assertTrue(any("daemon state was not checked" in note for note in notes))
+        self.assertNotIn(str(self.home), "\n".join(notes))
+        self.assertEqual(json.dumps([config, cli]), before)
+        self.assertEqual(verify.configuration_notes({}, {"trustedWorkspaces": [str(self.home / "project")]}, self.home), [])
+
+    def test_guidance_detects_embedded_and_upstream_drift(self):
+        repo, source = self.home / "repo", self.home / "source"
+        body = "# AI guidance\n\nUse evidence and preserve authority.\n"
+        manifest = {"sourceRepository": "YIYUAN-CALIBRATION", "sourcePath": "common/meta-guidance/ai-prompt.zh-CN.md", "sourceRevision": "a" * 40, "edition": "ai-prompt", "language": "zh-CN", "sha256Lf": hashlib.sha256(body.encode()).hexdigest()}
+        self.write(repo / "config/meta-guidance.json", manifest)
+        upstream = source / manifest["sourcePath"]
+        upstream.parent.mkdir(parents=True)
+        upstream.write_bytes(body.replace("\n", "\r\n").encode())
+        rules = repo / "AGENTS.md"
+        rules.write_text("<!-- META_GUIDANCE_START -->\n" + body + "<!-- META_GUIDANCE_END -->\n")
+        self.assertEqual(verify.verify_guidance(repo, source), [])
+        rules.write_text(rules.read_text().replace("preserve authority", "ignore authority"))
+        self.assertTrue(verify.verify_guidance(repo, source))
+        rules.write_text("<!-- META_GUIDANCE_START -->\n" + body + "<!-- META_GUIDANCE_END -->\n")
+        upstream.write_text(body.replace("preserve authority", "ignore authority"))
+        self.assertTrue(verify.verify_guidance(repo, source))
+        self.assertEqual(verify.verify_guidance(repo), [])
+
+    def test_guidance_rejects_general_edition_and_duplicate_blocks(self):
+        repo = self.home / "repo"
+        body = "AI prompt\n"
+        block = "<!-- META_GUIDANCE_START -->\n" + body + "<!-- META_GUIDANCE_END -->\n"
+        manifest = {"sourceRepository": "YIYUAN-CALIBRATION", "sourcePath": "common/meta-guidance/ai-prompt.zh-CN.md", "sourceRevision": "b" * 40, "edition": "general", "language": "zh-CN", "sha256Lf": hashlib.sha256(body.encode()).hexdigest()}
+        self.write(repo / "config/meta-guidance.json", manifest)
+        (repo / "AGENTS.md").write_text(block)
+        self.assertTrue(verify.verify_guidance(repo))
+        manifest["edition"] = "ai-prompt"
+        self.write(repo / "config/meta-guidance.json", manifest)
+        (repo / "AGENTS.md").write_text(block + block)
+        self.assertTrue(verify.verify_guidance(repo))
+
     def test_install_is_idempotent(self):
         result = self.run_install("--skip-rules")
         self.assertEqual(result.returncode, 0, result.stderr)
+        before = self.snapshot()
+        result = self.run_install("--skip-rules")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_install_does_not_readd_host_omitted_credit_default(self):
+        result = self.run_install("--skip-rules")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = self.cli / "settings.json"
+        normalized = json.loads(target.read_text())
+        normalized.pop("useG1Credits", None)
+        self.write(target, normalized)
         before = self.snapshot()
         result = self.run_install("--skip-rules")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -127,6 +252,64 @@ class TemporaryHome(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.config / "AGENTS.md").read_text(), "private existing rules")
         self.assertEqual(topic.read_text(), "private existing index")
+        self.assertFalse((self.home / ".gemini/AGENTS.md").exists())
+
+    def test_fresh_rules_use_common_app_cli_extension_location(self):
+        result = self.run_install("--skip-memory")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.home / ".gemini/AGENTS.md").read_bytes(), (REPO / "AGENTS.md").read_bytes())
+        self.assertFalse((self.config / "AGENTS.md").exists())
+
+    def test_replace_rules_migrates_legacy_without_duplicate_body(self):
+        current = self.home / ".gemini/AGENTS.md"
+        current.parent.mkdir(parents=True)
+        current.write_text("existing root rules")
+        self.config.mkdir()
+        legacy = self.config / "AGENTS.md"
+        legacy.write_text("existing legacy rules")
+        before = self.snapshot()
+        preview = self.run_install("--replace-rules", "--skip-memory", "--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertEqual(self.snapshot(), before)
+        result = self.run_install("--replace-rules", "--skip-memory")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(current.read_bytes(), (REPO / "AGENTS.md").read_bytes())
+        self.assertEqual(legacy.read_text(encoding="utf-8"), install.LEGACY_RULES_STUB)
+        self.assertEqual([p.read_text() for p in current.parent.glob("AGENTS.md.bak-*")], ["existing root rules"])
+        self.assertEqual([p.read_text() for p in legacy.parent.glob("AGENTS.md.bak-*")], ["existing legacy rules"])
+        installed = self.snapshot()
+        repeated = self.run_install("--replace-rules", "--skip-memory")
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(self.snapshot(), installed)
+
+    def test_existing_canonical_rules_are_preserved(self):
+        current = self.home / ".gemini/AGENTS.md"
+        current.parent.mkdir(parents=True)
+        current.write_text("custom root rules")
+        result = self.run_install("--skip-memory")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(current.read_text(), "custom root rules")
+        self.assertFalse((self.config / "AGENTS.md").exists())
+
+    def test_replace_rules_refuses_aliased_entries_before_writing(self):
+        for content in (b"linked custom rules", (REPO / "AGENTS.md").read_bytes()):
+            with self.subTest(already_current=content != b"linked custom rules"):
+                with tempfile.TemporaryDirectory(dir=self.home, prefix="alias-") as folder:
+                    home = Path(folder)
+                    root = home / ".gemini/AGENTS.md"
+                    root.parent.mkdir()
+                    root.write_bytes(content)
+                    legacy = home / ".gemini/config/AGENTS.md"
+                    legacy.parent.mkdir()
+                    try:
+                        os.link(root, legacy)
+                    except OSError:
+                        self.skipTest("hard links are unavailable")
+                    with patch.object(self, "home", home):
+                        before = self.snapshot()
+                        result = self.run_install("--replace-rules", "--skip-memory")
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(self.snapshot(), before)
 
     def test_guard_runs_from_unrelated_working_directory(self):
         self.write(self.config / "hooks.json", {"git-guard": {"enabled": False, "PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "node ./hooks/git-guard.js"}]}]}})

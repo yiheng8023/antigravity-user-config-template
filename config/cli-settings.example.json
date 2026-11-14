@@ -1,15 +1,8 @@
 {
-  "allowNonWorkspaceAccess": true,
-  "artifactReviewPolicy": "always-proceed",
-  "enableTerminalSandbox": false,
+  "$schema": "https://antigravity.google/schemas/v1/settings.json",
   "notifications": true,
   "showFeedbackSurvey": false,
   "showTips": false,
-  "toolPermission": "always-proceed",
-  "trustedWorkspaces": [
-    "__PROJECTS_DIR__",
-    "__USER_HOME__"
-  ],
-  "useG1Credits": false,
-  "verbosity": "high"
+  "trustedWorkspaces": [],
+  "verbosity": "medium"
 }

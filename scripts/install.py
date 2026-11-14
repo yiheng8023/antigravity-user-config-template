@@ -19,6 +19,22 @@ from safety import require_contained
 
 REPO = Path(__file__).resolve().parent.parent
 
+CLI_ENUMS = {
+    "agentMode": ("", "accept-edits", "auto", "plan"),
+    "toolPermission": ("request-review", "proceed-in-sandbox", "always-proceed", "strict"),
+    "artifactReviewPolicy": ("asks-for-review", "agent-decides", "always-proceed"),
+    "verbosity": ("high", "medium", "low"),
+}
+CLI_BOOLEANS = (
+    "allowNonWorkspaceAccess", "enableTerminalSandbox", "notifications",
+    "showFeedbackSurvey", "showTips", "useG1Credits",
+)
+TURBO_TEMPLATES = {
+    "config/config.example.json": "config/config.turbo.example.json",
+    "config/cli-settings.example.json": "config/cli-settings.turbo.example.json",
+}
+LEGACY_RULES_STUB = "<!-- Antigravity 全局规则已迁至 ~/.gemini/AGENTS.md；此兼容文件不再携带规则正文。 -->\n"
+
 
 def read_object(path: Path) -> tuple[dict, bytes | None]:
     if not path.exists():
@@ -42,6 +58,42 @@ def validate_sections(data: dict, name: str, sections: dict[str, type]) -> None:
     for key in ("plugins", "mcpServers"):
         if key in data and any(not isinstance(v, dict) for v in data[key].values()):
             raise ValueError(f"Invalid {name}.{key}: expected object entries")
+
+
+def validate_cli_settings(data: dict, name: str) -> None:
+    """校验模板使用的公开 CLI 字段；保留未知字段以兼容后续版本。"""
+    validate_sections(data, name, {"trustedWorkspaces": list})
+    for key, choices in CLI_ENUMS.items():
+        if key in data and (not isinstance(data[key], str) or data[key] not in choices):
+            raise ValueError(f"Invalid {name}.{key}: expected a documented option")
+    for key in CLI_BOOLEANS:
+        if key in data and not isinstance(data[key], bool):
+            raise ValueError(f"Invalid {name}.{key}: expected boolean")
+    if "$schema" in data and not isinstance(data["$schema"], str):
+        raise ValueError(f"Invalid {name}.$schema: expected string")
+
+
+def read_template(source: str, profile: str) -> dict:
+    path = REPO / source
+    if not path.is_file():
+        raise ValueError(f"Missing template: {source}")
+    template, _ = read_object(path)
+    if profile == "turbo" and source in TURBO_TEMPLATES:
+        overlay_source = TURBO_TEMPLATES[source]
+        overlay_path = REPO / overlay_source
+        if not overlay_path.is_file():
+            raise ValueError(f"Missing template: {overlay_source}")
+        overlay, _ = read_object(overlay_path)
+        if source == "config/config.example.json":
+            for data in (template, overlay):
+                validate_sections(data, source, {"plugins": dict, "userSettings": dict})
+            for section in ("plugins", "userSettings"):
+                template.setdefault(section, {}).update(overlay.get(section, {}))
+        else:
+            validate_cli_settings(template, source)
+            validate_cli_settings(overlay, overlay_source)
+            template.update(overlay)
+    return template
 
 
 def validate_hooks(data: dict) -> None:
@@ -124,6 +176,31 @@ def copy_dir(src: Path, dst: Path, dry: bool, preserve: bool = False) -> None:
         copy_file(item, dst / rel, dry, preserve=preserve)
 
 
+def install_rules(home: Path, dry: bool, replace: bool) -> None:
+    """使用 App、CLI 和 IDE 扩展共有的入口；默认保留已有任一入口的规则。"""
+    target = home / ".gemini/AGENTS.md"
+    legacy = home / ".gemini/config/AGENTS.md"
+    if not replace and (target.exists() or legacy.exists()):
+        print("  kept existing global rules; --replace-rules explicitly migrates the legacy config/AGENTS.md")
+        return
+    for path in (target, legacy):
+        require_contained(path, home / ".gemini")
+        if path.exists() and not path.is_file():
+            raise ValueError(f"Expected rules file: {path}")
+    if target.exists() and legacy.exists() and target.samefile(legacy):
+        raise ValueError("Global rules entries refer to the same file; separate the links before migration. No rules were changed")
+    legacy_original = legacy.read_bytes() if legacy.exists() else None
+    copy_file(REPO / "AGENTS.md", target, dry)
+    if legacy_original is not None and legacy_original.decode("utf-8-sig", errors="replace").replace("\r\n", "\n") != LEGACY_RULES_STUB:
+        check_unchanged(legacy, legacy_original)
+        if dry:
+            print("  [dry-run] would replace legacy config/AGENTS.md with a body-free migration notice")
+        else:
+            backup(legacy)
+            legacy.write_text(LEGACY_RULES_STUB, encoding="utf-8")
+            print("  migrated legacy rules; canonical body exists only at ~/.gemini/AGENTS.md")
+
+
 def merge_config(template: dict, existing: dict, hostname: str) -> dict:
     result = copy.deepcopy(existing)
     for section in ("plugins", "userSettings"):
@@ -171,7 +248,8 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rules", action="store_true", help="保留规则、记忆和知识库")
     parser.add_argument("--skip-memory", action="store_true", help="保留记忆和知识库")
-    parser.add_argument("--replace-rules", action="store_true", help="备份后替换已有 AGENTS.md")
+    parser.add_argument("--replace-rules", action="store_true", help="备份后替换 ~/.gemini/AGENTS.md，并迁移旧 config/AGENTS.md")
+    parser.add_argument("--profile", choices=("default", "turbo"), default="default", help="首次安装的默认值；turbo 显式启用宽权限，已有值仍优先")
     args = parser.parse_args()
     if args.skip_rules and args.replace_rules:
         parser.error("--skip-rules and --replace-rules cannot be combined")
@@ -187,12 +265,13 @@ def main() -> None:
     try:
         prepared = []
         for source, target, sections in specifications:
-            template, _ = read_object(REPO / source)
-            if not (REPO / source).is_file():
-                raise ValueError(f"Missing template: {source}")
+            template = read_template(source, args.profile)
             existing, original = read_object(target)
             validate_sections(template, source, sections)
             validate_sections(existing, target.name, sections)
+            if source == "config/cli-settings.example.json":
+                validate_cli_settings(template, source)
+                validate_cli_settings(existing, "CLI settings.json")
             if source == "hooks.json":
                 validate_hooks(template)
                 validate_hooks(existing)
@@ -209,9 +288,10 @@ def main() -> None:
         if shutil.which("node") is None:
             raise ValueError("Node.js is required for the Git hook; no configuration was changed")
         print(f"Installing into: {home / '.gemini'}" + (" [DRY RUN]" if args.dry_run else ""))
+        print(f"Profile: {args.profile}; existing values take precedence.")
         # 所有 JSON 预检通过后才复制或写入，避免损坏配置引发半途覆盖。
         if not args.skip_rules:
-            copy_file(REPO / "AGENTS.md", config_dir / "AGENTS.md", args.dry_run, preserve=not args.replace_rules)
+            install_rules(home, args.dry_run, args.replace_rules)
         copy_dir(REPO / "hooks", config_dir / "hooks", args.dry_run)
         if not (args.skip_rules or args.skip_memory):
             copy_dir(REPO / "memory", config_dir / "memory", args.dry_run, preserve=True)

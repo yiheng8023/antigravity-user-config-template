@@ -4,13 +4,13 @@
 
 用于创建私有 Google Antigravity（涵盖 `Antigravity 2.0`、`Antigravity IDE` 与 `agy` CLI）用户配置仓库的公开安全模板，避免公开个人全局记忆、知识库、私有提示词、凭据、账号状态或本机运行细节。
 
-本仓是模板，不是正在运行的真实用户配置。请将其作为安全起点，将真实配置保存在你自己的私有仓库（`private antigravity-user-config`）中；同事或外部用户也可直接使用本仓一键应用满血设置与安全护栏。
+本仓是模板，不是正在运行的真实用户配置。请将其作为安全起点，将真实配置保存在你自己的私有仓库（`private antigravity-user-config`）中；同事或外部用户也可直接使用本仓一键应用可移植默认值与安全护栏。
 
 ## 快速开始
 
 | 如果你想…… | 请看这里 |
 | --- | --- |
-| 仅应用满血设置、MCP 与安全护栏（不覆盖自己的 `AGENTS.md`） | `python -B scripts/install.py --skip-rules` |
+| 仅应用可移植默认值、MCP 与安全护栏（不覆盖自己的 `AGENTS.md`） | `python -B scripts/install.py --skip-rules` |
 | 在不改动本机的情况下预览安装 | `python -B scripts/install.py --dry-run` |
 | 校验模板完整性与安全边界 | `python -B scripts/verify.py` |
 | 清理临时过程产物与运行时缓存 | `python -B scripts/clean.py --runtime` |
@@ -38,9 +38,11 @@ claude-user-config-template / codex-user-config-template
 ## 安装边界与验证
 
 已有权限、插件禁用状态、自定义 hooks、MCP、CLI 偏好和信任目录优先于模板。
-首次安装仍使用 Turbo 权限及较宽的目录信任范围，请先查看 JSON 模板。
+首次安装沿用宿主权限默认值，不批量启用插件，不预置信任目录，
+不写入 Remote Control 或迁移状态。需要宽权限时显式选择 `--profile turbo`；
+已有值仍优先。完整取舍见[配置说明](config/README.md)。
 已有规则和记忆默认保留；显式替换规则使用 `--replace-rules`。
-`--skip-rules` 完整跳过规则、记忆和知识库。目标 JSON 或字段类型无效时，安装器
+`--skip-rules` 完整跳过规则、记忆和知识库。目标 JSON、字段类型或已知 CLI 选项无效时，安装器
 在写入前停止；变更 JSON 先备份，再原子替换。
 
 记忆和知识库同步默认保留目标额外文件。只有显式 `--prune` 才删除过期项，先用
@@ -56,6 +58,8 @@ python -B scripts/verify.py --live
 ```
 
 依赖 Python 3.10+、Node.js。GitHub CI 覆盖 Windows、macOS、Linux。
-`--live` 检查本地 JSON、安装后的 Git 护栏，并检测旧版 `agy` 对 `~/.gemini/bin`
-的 PATH 遮蔽。运行中的客户端需重开以加载 hooks；直接协议测试不证明现有会话已重载。
+`--live` 检查本地 JSON、安装后的 Git 护栏，并提示宽权限与目录信任取舍，
+检查 PATH 是否选中旧版 `agy`。使用官方更新器更新当前入口，避免新增重复 PATH。运行中的客户端需重开以加载 hooks；直接协议测试不证明现有会话已重载。
 护栏适用范围见 [hooks 说明](hooks/README.md)，版本变更见 [CHANGELOG](CHANGELOG.md)。
+
+元指导使用 YIYUAN-CALIBRATION 的 AI 中文原文；来源记录与核验方式见[配置说明](config/README.md#meta-guidance-source--元指导来源)。

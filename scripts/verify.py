@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import argparse
+import hashlib
 import re
 import shutil
 import subprocess
@@ -11,7 +14,7 @@ from pathlib import Path
 
 from safety import SECRET_PATTERNS, is_template_repo as template_repository
 
-from install import read_object, validate_sections, validate_hooks
+from install import read_object, validate_sections, validate_hooks, validate_cli_settings
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -29,6 +32,10 @@ EXPECTED_BASE = [
     "config/config.example.json",
     "config/mcp_config.example.json",
     "config/cli-settings.example.json",
+    "config/config.turbo.example.json",
+    "config/cli-settings.turbo.example.json",
+    "config/README.md",
+    "config/meta-guidance.json",
     ".gitignore",
     ".gitattributes",
     ".editorconfig",
@@ -81,12 +88,16 @@ JSON_FILES = [
     "config/config.example.json",
     "config/mcp_config.example.json",
     "config/cli-settings.example.json",
+    "config/config.turbo.example.json",
+    "config/cli-settings.turbo.example.json",
 ]
 
 JSON_SECTIONS = {
     "config/config.example.json": {"plugins": dict, "userSettings": dict},
     "config/mcp_config.example.json": {"mcpServers": dict},
     "config/cli-settings.example.json": {"trustedWorkspaces": list},
+    "config/config.turbo.example.json": {"plugins": dict, "userSettings": dict},
+    "config/cli-settings.turbo.example.json": {"trustedWorkspaces": list},
 }
 
 
@@ -94,10 +105,13 @@ SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".ico", ".pdf", ".db", ".sqlite", ".pb"}
 
 
 def main() -> None:
-    if any(arg != "--live" for arg in sys.argv[1:]):
-        sys.exit("Usage: python -B scripts/verify.py [--live]")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live", action="store_true")
+    parser.add_argument("--guidance-source", type=Path, help="只读核验 YIYUAN-CALIBRATION 中的 AI 中文原文")
+    args = parser.parse_args()
     errs: list[str] = []
     template_mode = is_template_repo()
+    errs.extend(verify_guidance(REPO, args.guidance_source))
 
     for rel in EXPECTED_BASE:
         if not (REPO / rel).exists():
@@ -221,6 +235,8 @@ def main() -> None:
                     validate_hooks(data)
                 else:
                     validate_sections(data, jrel, JSON_SECTIONS[jrel])
+                    if jrel.startswith("config/cli-settings."):
+                        validate_cli_settings(data, jrel)
             except Exception as exc:
                 errs.append(f"invalid JSON in {jrel}: {exc}")
 
@@ -256,7 +272,7 @@ def main() -> None:
             if m:
                 errs.append(f"possible secret [{label}] in {f.relative_to(REPO)}")
 
-    if "--live" in sys.argv[1:]:
+    if args.live:
         errs.extend(verify_live())
 
     if errs:
@@ -267,10 +283,66 @@ def main() -> None:
     print(f"Validation passed ({'template' if template_mode else 'private'} mode).")
 
 
+def verify_guidance(repo: Path, source_root: Path | None = None, rules_path: Path | None = None) -> list[str]:
+    """核验固定来源与嵌入原文；只有显式提供源目录时才检查上游是否漂移。"""
+    try:
+        manifest, _ = read_object(repo / "config/meta-guidance.json")
+        expected = {"sourceRepository": "YIYUAN-CALIBRATION", "sourcePath": "common/meta-guidance/ai-prompt.zh-CN.md", "edition": "ai-prompt", "language": "zh-CN"}
+        if any(manifest.get(key) != value for key, value in expected.items()):
+            raise ValueError("expected the AI prompt edition and its canonical Chinese source")
+        if not isinstance(manifest.get("sourceRevision"), str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", manifest["sourceRevision"]):
+            raise ValueError("invalid source revision")
+        digest = manifest.get("sha256Lf")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("invalid source digest")
+        rules = (rules_path if rules_path is not None else repo / "AGENTS.md").read_text(encoding="utf-8-sig")
+        blocks = re.findall(r"<!-- META_GUIDANCE_START -->(.*?)<!-- META_GUIDANCE_END -->", rules, re.DOTALL)
+        if len(blocks) != 1 or rules.count("<!-- META_GUIDANCE_START -->") != 1 or rules.count("<!-- META_GUIDANCE_END -->") != 1:
+            raise ValueError("expected exactly one bounded meta-guidance block")
+        def text_digest(text: str) -> str:
+            normalized = text.replace("\r\n", "\n").strip() + "\n"
+            return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        if text_digest(blocks[0]) != digest:
+            raise ValueError("embedded AI guidance differs from the pinned source")
+        if source_root is not None:
+            source = source_root / expected["sourcePath"]
+            if text_digest(source.read_text(encoding="utf-8-sig")) != digest:
+                raise ValueError("upstream AI guidance changed; review and update the pinned text and provenance together")
+    except (ValueError, OSError, UnicodeError) as exc:
+        return [f"Meta-guidance: {exc}"]
+    return []
+
+
+def configuration_notes(config: dict, cli: dict, home: Path) -> list[str]:
+    """仅提示配置取舍，不修改用户选择，也不输出本机路径或权限规则内容。"""
+    notes = []
+    settings = config.get("userSettings", {})
+    if settings.get("permissionPreset") == "AGENT_PERMISSION_PRESET_TURBO" or cli.get("toolPermission") == "always-proceed":
+        notes.append("Turbo / always-proceed is configured; the Git guard does not isolate other commands.")
+    if settings.get("allowAgentAccessNonWorkspaceFiles") is True or cli.get("allowNonWorkspaceAccess") is True:
+        notes.append("Non-workspace file access is enabled.")
+    # 仅做词法归一化，避免审计信任目录时访问不可用的网络盘或联接。
+    def trust_key(path: str | Path) -> str:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(str(path))))
+    broad_roots = {trust_key(home), trust_key(home.anchor)}
+    if any(trust_key(w) in broad_roots for w in cli.get("trustedWorkspaces", [])):
+        notes.append("The user home or filesystem root is trusted; narrower project trust is available.")
+    if settings.get("remoteControlEnabled") is True:
+        notes.append("Remote Control is enabled in settings; connection / daemon state was not checked.")
+    if any(k in settings for k in ("permissionGrantsV2Migrated", "sandboxEnabledAtV2Migration")):
+        notes.append("Host migration state exists locally; keep it out of portable templates.")
+    return notes
+
+
 def verify_live() -> list[str]:
     """仅读取必要状态；MCP 内容、会话与认证信息不会进入输出。"""
     errs = []
+    live = {}
     root = Path.home() / ".gemini"
+    guidance_errors = verify_guidance(REPO, rules_path=root / "AGENTS.md")
+    errs.extend(guidance_errors)
+    if not guidance_errors:
+        print("Live meta-guidance matches the pinned AI source.")
     for rel, sections in [
         ("config/config.json", {"plugins": dict, "userSettings": dict}),
         ("config/mcp_config.json", {"mcpServers": dict}),
@@ -282,9 +354,15 @@ def verify_live() -> list[str]:
                 raise ValueError(f"Missing live file: {rel}")
             data, _ = read_object(target)
             validate_sections(data, rel, sections)
+            if rel == "antigravity-cli/settings.json":
+                validate_cli_settings(data, "CLI settings.json")
+            live[rel] = data
             print(f"Live JSON valid: {rel}")
         except (ValueError, OSError) as exc:
             errs.append(str(exc))
+    if "config/config.json" in live and "antigravity-cli/settings.json" in live:
+        for note in configuration_notes(live["config/config.json"], live["antigravity-cli/settings.json"], Path.home()):
+            print("Configuration note: " + note)
     try:
         hooks, _ = read_object(root / "config/hooks.json")
         validate_hooks(hooks)
@@ -319,7 +397,7 @@ def verify_live() -> list[str]:
         current = version(selected)
         print("Live agy: " + ".".join(map(str, current)))
         if preferred.exists() and version(preferred) > current:
-            errs.append("PATH selects an older agy than ~/.gemini/bin; correct PATH order")
+            errs.append("PATH selects an older agy than ~/.gemini/bin; update the selected installation without adding another PATH entry")
     except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
         errs.append(str(exc))
     return errs
